@@ -20,7 +20,16 @@
     VK_DYN_FUNCTION(GetPhysicalDeviceQueueFamilyProperties);
     VK_DYN_FUNCTION(CreateDevice);
     VK_DYN_FUNCTION(GetDeviceProcAddr);
+
+#if defined(VK_USE_PLATFORM_WIN32_KHR)
+    VK_DYN_FUNCTION(CreateWin32SurfaceKHR);
+#endif
+
+#if defined(VK_USE_PLATFORM_WAYLAND_KHR)
     VK_DYN_FUNCTION(CreateWaylandSurfaceKHR);
+#endif
+
+
     VK_DYN_FUNCTION(GetPhysicalDeviceSurfaceCapabilitiesKHR);
     VK_DYN_FUNCTION(GetPhysicalDeviceSurfacePresentModesKHR);
     VK_DYN_FUNCTION(GetPhysicalDeviceSurfaceFormatsKHR);

@@ -1,3 +1,4 @@
+#define _CRT_SECURE_NO_WARNINGS
 #include <stdint.h>
 
 #include <stdio.h>
@@ -5,8 +6,6 @@
 #include <string.h>
 
 #include <assert.h>
-
-#include <dlfcn.h>
 
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_vulkan.h>
@@ -34,6 +33,26 @@ struct Str8 {
     S64 count;
     U8 *data;
 };
+
+// operating system detection
+//
+#define OS_WINDOWS 0
+#define OS_LINUX   0
+
+#if defined(_WIN32)
+    #undef  OS_WINDOWS
+    #define OS_WINDOWS 1
+#elif defined(__linux__)
+    #undef  OS_LINUX
+    #define OS_LINUX 1
+#endif
+
+#if OS_WINDOWS
+    // @todo: do we really want to include windows.h
+    #include <windows.h>
+#elif OS_LINUX
+    #include <dlfcn.h>
+#endif
 
 #define STRINGIFY(x) #x
 
@@ -155,7 +174,7 @@ struct A_Mesh {
 
     Str8 string_table;
 
-    U16 num_vertices;
+    U32 num_vertices;
 
     U32 num_indices;
     U16 *indices; // 3 * num_faces in length
@@ -440,7 +459,7 @@ static B32 SkeletonFileLoad(A_Skeleton *skeleton, const char *path) {
 
         fread(skeleton->string_table.data, string_table_count, 1, f);
 
-        skeleton->num_bones      = num_bones;
+        skeleton->num_bones      = (U8) num_bones;
         skeleton->num_animations = num_tracks;
 
         skeleton->bones = (A_Bone *) malloc(num_bones * sizeof(A_Bone));
@@ -499,10 +518,8 @@ static B32 SkeletonFileLoad(A_Skeleton *skeleton, const char *path) {
         for (U32 it = 0; it < num_tracks; ++it) {
             A_Animation3 *animation = &skeleton->animations[it];
 
-            for (U32 f = 0; f < animation->num_frames; ++f) {
-                A_Frame *frame = &animation->frames[f];
-                frame->samples = samples;
-
+            for (U32 frame = 0; frame < animation->num_frames; ++frame) {
+                animation->frames[frame].samples = samples;
                 samples += num_bones;
             }
         }
@@ -578,12 +595,15 @@ static A_Sample AnimationSampleLerp(A_Sample *from, A_Sample *to, F32 t) {
 static void AnimationEvaluate(A_Skeleton *skeleton, A_Animation3 *animation, F32 dt, A_Sample *samples) { // one sample per bone in skeleton
     // @todo: write the actual framerate to the animation file from blender, assumes 24fps for now
     //
+    // @fix: we have the frame rate!!
+    //
 #define FRAME_RATE 30.0f
     F32 total_time = (1.0f / FRAME_RATE) * animation->num_frames;
 
     animation->time += (animation->time_scale * dt);
 
-    if (animation->time >= total_time) { animation->time -= total_time; }
+    // @todo: just calculate the number of times we need to take away if the time gets large for whatever reason
+    while (animation->time >= total_time) { animation->time -= total_time; }
 
     U32 frame_index0 = (U32) ((animation->time / total_time) * animation->num_frames);
     U32 frame_index1 = (frame_index0 + 1) % animation->num_frames;
@@ -645,7 +665,55 @@ static void AnimationBoneMatricesGet(A_Skeleton *skeleton, A_Sample *samples, Ma
     }
 }
 
+#if OS_WINDOWS
+static U64 U64TicksGet() {
+    U64 result;
+
+    LARGE_INTEGER i;
+    QueryPerformanceCounter(&i);
+
+    result = i.QuadPart;
+    return result;
+}
+
+static F64 F64ElapsedTimeGet(U64 start, U64 end) {
+    F64 result;
+
+    LARGE_INTEGER f;
+    QueryPerformanceFrequency(&f);
+
+    result = (F64) (end - start) / (F64) f.QuadPart;
+    return result;
+}
+#elif OS_LINUX
+static U64 U64TicksGet() {
+    U64 result;
+
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC_RAW, &t);
+
+    result = (1000000000 * t.tv_sec) + t.tv_nsec;
+    return result;
+}
+
+static F64 F64ElapsedTimeGet(U64 start, U64 end) {
+    F64 result = (F64) (end - start) / 1000000000.0;
+    return result;
+}
+#endif
+
+#if OS_WINDOWS
+int WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
+    (void) hInstance;
+    (void) hPrevInstance;
+    (void) lpCmdLine;
+    (void) nCmdShow;
+#elif OS_LINUX
 int main(int argc, char **argv) {
+    (void) argv;
+    (void) argc;
+#endif
+
 #if 0
     if (argc < 3) {
         printf("usage: %s <file>.mesh <file>.anim\n", argv[0]);
@@ -657,7 +725,7 @@ int main(int argc, char **argv) {
     //const char *mesh_path = "../test/mesh/ninja_female_01.mesh";
     //const char *skel_path = "../test/skeleton/ninja_female_01.anim";
 
-    const char *mesh_path = "/home/james/George.amtm";
+    const char *mesh_path = "../test/George.amtm";
     const char *skel_path = "../test/other.amts";
 #endif
 
@@ -727,8 +795,13 @@ int main(int argc, char **argv) {
     VK_Swapchain _swapchain = {};
     VK_Swapchain *swapchain = &_swapchain;
 
+#if OS_WINDOWS
+    swapchain->surface.win.hinstance = wm_info.info.win.hinstance;
+    swapchain->surface.win.hwnd      = wm_info.info.win.window;
+#elif OS_LINUX
     swapchain->surface.wl.display = wm_info.info.wl.display;
     swapchain->surface.wl.surface = wm_info.info.wl.surface;
+#endif
 
     swapchain->surface.width  = window_width;
     swapchain->surface.height = window_height;
@@ -980,8 +1053,8 @@ int main(int argc, char **argv) {
     U32 animation_index = 0;
 
     // for timing
-    struct timespec t0, t1;
     F32 delta_time = 0;
+    U64 start = U64TicksGet();
 
 #if 0
     F32 blend_time = 0;
@@ -1013,8 +1086,6 @@ int main(int argc, char **argv) {
         }
     }
 #endif
-
-    clock_gettime(CLOCK_MONOTONIC_RAW, &t0);
 
     while (running) {
         SDL_Event e;
@@ -1079,8 +1150,8 @@ int main(int argc, char **argv) {
                     pitch += MOUSE_SENSITIVITY * delta_time * e.motion.yrel;
                 }
 
-                if (pitch < M_PI) { pitch = M_PI; }
-                if (pitch > (2 * M_PI)) { pitch = 2 * M_PI; }
+                if (pitch < M_PI) { pitch = (F32) M_PI; }
+                if (pitch > (2 * M_PI)) { pitch = 2.0f * (F32) M_PI; }
             }
             else if (e.type == SDL_WINDOWEVENT) {
                 if (e.window.event == SDL_WINDOWEVENT_RESIZED) {
@@ -1305,14 +1376,14 @@ int main(int argc, char **argv) {
         vk->CmdBindPipeline(cmds, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline.handle);
 
         VkViewport viewport = {};
-        viewport.width    = swapchain->surface.width;
-        viewport.height   = swapchain->surface.height;
+        viewport.width    = (F32) swapchain->surface.width;
+        viewport.height   = (F32) swapchain->surface.height;
         viewport.minDepth = 0.0f;
         viewport.maxDepth = 1.0f;
 
         VkRect2D scissor = {};
-        scissor.extent.width  = viewport.width;
-        scissor.extent.height = viewport.height;
+        scissor.extent.width  = (U32) viewport.width;
+        scissor.extent.height = (U32) viewport.height;
 
         vk->CmdSetViewport(cmds, 0, 1, &viewport);
         vk->CmdSetScissor(cmds, 0, 1, &scissor);
@@ -1468,14 +1539,10 @@ int main(int argc, char **argv) {
             assert(success == VK_SUCCESS);
         }
 
-        clock_gettime(CLOCK_MONOTONIC_RAW, &t1);
+        U64 end = U64TicksGet();
+        delta_time = (F32) F64ElapsedTimeGet(start, end);
 
-        U64 t0_nsec = (1000000000 * t0.tv_sec) + t0.tv_nsec;
-        U64 t1_nsec = (1000000000 * t1.tv_sec) + t1.tv_nsec;
-
-        delta_time = (F64) (t1_nsec - t0_nsec) / 1000000000.0;
-
-        t0 = t1;
+        start = end;
     }
 
     return 0;

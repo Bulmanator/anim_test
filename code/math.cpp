@@ -61,7 +61,11 @@ static Vec3F V3FMulF32(Vec3F v, F32 s) {
 }
 
 static Vec3F V3FNeg(Vec3F v) {
-    Vec3F result = (Vec3F) { -v.x, -v.y, -v.z };
+    Vec3F result;
+    result.x = -v.x;
+    result.y = -v.y;
+    result.z = -v.z;
+
     return result;
 }
 
@@ -144,11 +148,18 @@ static Mat4x4F M4x4FMul(Mat4x4F a, Mat4x4F b) {
 }
 
 static Vec3F M4x4FMulV3F(Mat4x4F m, Vec3F v) {
-    Vec4F vv = (Vec4F) { v.x, v.y, v.z, 1.0 };
+    Vec4F vv;
+    vv.x = v.x;
+    vv.y = v.y;
+    vv.z = v.z;
+    vv.w = 1.0f;
 
     Vec4F p = M4x4FMulV4F(m, vv);
 
-    Vec3F result = (Vec3F) { p.x, p.y, p.z };
+    Vec3F result;
+    result.x = p.x;
+    result.y = p.y;
+    result.z = p.z;
     return result;
 }
 
@@ -184,12 +195,12 @@ static Mat4x4F M4x4FTranslateV3F(Mat4x4F m, Vec3F v) {
     return result;
 }
 
-static Mat4x4FInv M4x4FPerspectiveProjection(F32 focal_length, F32 aspect, F32 near, F32 far) {
+static Mat4x4FInv M4x4FPerspectiveProjection(F32 focal_length, F32 aspect, F32 near_plane, F32 far_plane) {
     F32 a = focal_length / aspect;
     F32 b = focal_length;
 
-    F32 c = (near + far) / (near - far);
-    F32 d = (2.0 * near * far) / (near - far);
+    F32 c = (near_plane + far_plane) / (near_plane - far_plane);
+    F32 d = (2.0f * near_plane * far_plane) / (near_plane - far_plane);
 
     Mat4x4FInv result = {
         // fwd
@@ -221,9 +232,9 @@ static Mat4x4FInv M4x4FCameraViewProjection(Vec3F x, Vec3F y, Vec3F z, Vec3F p) 
     Vec3F txp  = V3FNeg(M4x4FMulV3F(result.fwd, p));
     result.fwd = M4x4FTranslateV3F(result.fwd, txp);
 
-    Vec3F ix = V3FMulF32(x, 1.0 / V3FDot(x, x));
-    Vec3F iy = V3FMulF32(y, 1.0 / V3FDot(y, y));
-    Vec3F iz = V3FMulF32(z, 1.0 / V3FDot(z, z));
+    Vec3F ix = V3FMulF32(x, 1.0f / V3FDot(x, x));
+    Vec3F iy = V3FMulF32(y, 1.0f / V3FDot(y, y));
+    Vec3F iz = V3FMulF32(z, 1.0f / V3FDot(z, z));
 
     Vec3F ip;
     ip.x = (txp.x * ix.x) + (txp.y * iy.x) + (txp.z * iz.x);
@@ -250,7 +261,7 @@ static Mat4x4F M4x4FIdentity() {
 static Quat4F Q4FNormalise(Quat4F q) {
     Quat4F result = { 0, 0, 0, 1 };
 
-    F32 sq = sqrt((q.w * q.w) + (q.x * q.x) + (q.y * q.y) + (q.z * q.z));
+    F32 sq = sqrtf((q.w * q.w) + (q.x * q.x) + (q.y * q.y) + (q.z * q.z));
     if (sq != 0) {
         F32 inv = 1.0f / sq;
 

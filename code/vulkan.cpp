@@ -1,4 +1,9 @@
-#define VK_USE_PLATFORM_WAYLAND_KHR 1
+#if OS_WINDOWS
+    #define VK_USE_PLATFORM_WIN32_KHR   1
+#elif OS_LINUX
+    #define VK_USE_PLATFORM_WAYLAND_KHR 1
+#endif
+
 #define VK_NO_PROTOTYPES 1
 #include <vulkan/vulkan.h>
 
@@ -74,7 +79,12 @@ struct VK_Device {
 };
 
 struct VK_Context {
+#if OS_WINDOWS
+    HMODULE lib;
+#elif OS_LINUX
     void *lib;
+#endif
+
     PFN_vkGetInstanceProcAddr GetInstanceProcAddr;
 
     VK_ContextFlags flags;
@@ -100,10 +110,17 @@ struct VK_Swapchain {
         VkSurfaceFormatKHR format;
 
         union {
+#if OS_WINDOWS
+            struct {
+                HINSTANCE hinstance;
+                HWND hwnd;
+            } win;
+#elif OS_LINUX
             struct {
                 struct wl_display *display;
                 struct wl_surface *surface;
             } wl;
+#endif
         };
 
         U32 width;
@@ -159,10 +176,19 @@ struct VK_Buffer {
 static B32 VK_LibraryLoad(VK_Context *vk) {
     B32 result;
 
+#if OS_WINDOWS
+    // I assume this just works, its how volk does it and if its in path it should be available
+    //
+    vk->lib = LoadLibraryA("vulkan-1.dll");
+    if (vk->lib) {
+        vk->GetInstanceProcAddr = (PFN_vkGetInstanceProcAddr) GetProcAddress(vk->lib, "vkGetInstanceProcAddr");
+    }
+#elif OS_LINUX
     vk->lib = dlopen("libvulkan.so", RTLD_NOW);
     if (vk->lib) {
         vk->GetInstanceProcAddr = (PFN_vkGetInstanceProcAddr) dlsym(vk->lib, "vkGetInstanceProcAddr");
     }
+#endif
 
     result = (vk->lib != 0) && (vk->GetInstanceProcAddr != 0);
     return result;
@@ -174,6 +200,10 @@ static VkBool32 VK_DebugMessageCallback(
         const VkDebugUtilsMessengerCallbackDataEXT*      pCallbackData,
         void*                                            pUserData)
 {
+    (void) messageSeverity;
+    (void) messageTypes;
+    (void) pUserData;
+
     // @todo: make this more verbose
     //
     printf("[VULKAN] :: %s\n", pCallbackData->pMessage);
@@ -216,7 +246,13 @@ static B32 VK_ContextInitialise(VK_Context *vk) {
         U32 extension_count = 2;
         const char *extensions[8] = {
             VK_KHR_SURFACE_EXTENSION_NAME,
+        #if OS_WINDOWS
+            VK_KHR_WIN32_SURFACE_EXTENSION_NAME
+        #elif OS_LINUX
+            // @todo: add xlib support!
+            //
             VK_KHR_WAYLAND_SURFACE_EXTENSION_NAME
+        #endif
         };
 
         if (debug) { extensions[extension_count++] = VK_EXT_DEBUG_UTILS_EXTENSION_NAME; }
@@ -334,8 +370,8 @@ static B32 VK_ContextInitialise(VK_Context *vk) {
 
     // Create device
     //
+    VK_Device *device = vk->device;
     {
-        VK_Device *device = vk->device;
 
         F32 queue_priority = 1.0f;
 
@@ -396,98 +432,98 @@ static B32 VK_ContextInitialise(VK_Context *vk) {
         #undef VK_DYN_FUNCTION
 
         vk->GetDeviceQueue(device->handle, device->graphics_queue.family, 0, &device->graphics_queue.handle);
+    }
 
-        // create a command pool for quick one time scratch commands
+    // create a command pool for quick one time scratch commands
+    //
+    {
+        VkCommandPoolCreateInfo create_info = {};
+        create_info.sType            = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+        create_info.flags            = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+        create_info.queueFamilyIndex = device->graphics_queue.family;
+
+        VK_CHECK(vk->CreateCommandPool(device->handle, &create_info, 0, &device->scratch_cmd_pool));
+    }
+
+    for (U32 it = 0; it < VK_FRAME_COUNT; ++it) {
+        VK_Frame *frame = &device->frames[it];
+        VK_Frame *next  = &device->frames[(it + 1) % VK_FRAME_COUNT];
+
+        frame->next = next;
+
+        // Now initialise this frame's data
         //
         {
             VkCommandPoolCreateInfo create_info = {};
             create_info.sType            = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-            create_info.flags            = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
             create_info.queueFamilyIndex = device->graphics_queue.family;
 
-            VK_CHECK(vk->CreateCommandPool(device->handle, &create_info, 0, &device->scratch_cmd_pool));
+            VK_CHECK(vk->CreateCommandPool(device->handle, &create_info, 0, &frame->command_pool));
+
+            VK_CommandBufferSet *cmds = &frame->cmds_first;
+
+            cmds->next_buffer = 0;
+            cmds->next        = 0;
+
+            VkCommandBufferAllocateInfo alloc_info = {};
+            alloc_info.sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+            alloc_info.commandPool        = frame->command_pool;
+            alloc_info.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+            alloc_info.commandBufferCount = VK_COMMAND_BUFFER_SET_COUNT;
+
+            VK_CHECK(vk->AllocateCommandBuffers(device->handle, &alloc_info, cmds->handles));
+
+            frame->cmds = cmds;
         }
 
-        for (U32 it = 0; it < VK_FRAME_COUNT; ++it) {
-            VK_Frame *frame = &device->frames[it];
-            VK_Frame *next  = &device->frames[(it + 1) % VK_FRAME_COUNT];
+        // :note the pool sizes were chosen arbitarily, can change if need be. sum to 16384
+        //
+        // :note we only support separated samplers, this is simpler and is more in line with how
+        // gpus actually work. we also only use storage buffer, however, on modern desktop class gpus
+        // the difference between uniform and storage buffers is either non-existent or negligible
+        //
+        // @todo: UPDATE_AFTER_BIND_BIT for image pool, may need two seperate pools for allocating
+        // image descriptors if we want. for bindless texturing
+        //
+        {
+            VkDescriptorPoolSize pool_sizes[3] = {};
 
-            frame->next = next;
+            pool_sizes[0].type            = VK_DESCRIPTOR_TYPE_SAMPLER;
+            pool_sizes[0].descriptorCount = 64;
 
-            // Now initialise this frame's data
-            //
-            {
-                VkCommandPoolCreateInfo create_info = {};
-                create_info.sType            = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
-                create_info.queueFamilyIndex = device->graphics_queue.family;
+            pool_sizes[1].type            = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+            pool_sizes[1].descriptorCount = 12224;
 
-                VK_CHECK(vk->CreateCommandPool(device->handle, &create_info, 0, &frame->command_pool));
+            pool_sizes[2].type            = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            pool_sizes[2].descriptorCount = 4096;
 
-                VK_CommandBufferSet *cmds = &frame->cmds_first;
+            VkDescriptorPoolCreateInfo create_info = {};
+            create_info.sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+            create_info.maxSets       = 2048;
+            create_info.poolSizeCount = 3;
+            create_info.pPoolSizes    = pool_sizes;
 
-                cmds->next_buffer = 0;
-                cmds->next        = 0;
-
-                VkCommandBufferAllocateInfo alloc_info = {};
-                alloc_info.sType              = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-                alloc_info.commandPool        = frame->command_pool;
-                alloc_info.level              = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-                alloc_info.commandBufferCount = VK_COMMAND_BUFFER_SET_COUNT;
-
-                VK_CHECK(vk->AllocateCommandBuffers(device->handle, &alloc_info, cmds->handles));
-
-                frame->cmds = cmds;
-            }
-
-            // :note the pool sizes were chosen arbitarily, can change if need be. sum to 16384
-            //
-            // :note we only support separated samplers, this is simpler and is more in line with how
-            // gpus actually work. we also only use storage buffer, however, on modern desktop class gpus
-            // the difference between uniform and storage buffers is either non-existent or negligible
-            //
-            // @todo: UPDATE_AFTER_BIND_BIT for image pool, may need two seperate pools for allocating
-            // image descriptors if we want. for bindless texturing
-            //
-            {
-                VkDescriptorPoolSize pool_sizes[3] = {};
-
-                pool_sizes[0].type            = VK_DESCRIPTOR_TYPE_SAMPLER;
-                pool_sizes[0].descriptorCount = 64;
-
-                pool_sizes[1].type            = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-                pool_sizes[1].descriptorCount = 12224;
-
-                pool_sizes[2].type            = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-                pool_sizes[2].descriptorCount = 4096;
-
-                VkDescriptorPoolCreateInfo create_info = {};
-                create_info.sType         = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-                create_info.maxSets       = 2048;
-                create_info.poolSizeCount = 3;
-                create_info.pPoolSizes    = pool_sizes;
-
-                VK_CHECK(vk->CreateDescriptorPool(device->handle, &create_info, 0, &frame->descriptor_pool));
-            }
-
-            {
-                VkSemaphoreCreateInfo create_info = {};
-                create_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-
-                VK_CHECK(vk->CreateSemaphore(device->handle, &create_info, 0, &frame->acquire));
-                VK_CHECK(vk->CreateSemaphore(device->handle, &create_info, 0, &frame->render));
-            }
-
-            {
-                VkFenceCreateInfo create_info = {};
-                create_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-                create_info.flags = VK_FENCE_CREATE_SIGNALED_BIT;
-
-                VK_CHECK(vk->CreateFence(device->handle, &create_info, 0, &frame->fence));
-            }
+            VK_CHECK(vk->CreateDescriptorPool(device->handle, &create_info, 0, &frame->descriptor_pool));
         }
 
-        device->frame = &device->frames[0];
+        {
+            VkSemaphoreCreateInfo create_info = {};
+            create_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+
+            VK_CHECK(vk->CreateSemaphore(device->handle, &create_info, 0, &frame->acquire));
+            VK_CHECK(vk->CreateSemaphore(device->handle, &create_info, 0, &frame->render));
+        }
+
+        {
+            VkFenceCreateInfo create_info = {};
+            create_info.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+            create_info.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+
+            VK_CHECK(vk->CreateFence(device->handle, &create_info, 0, &frame->fence));
+        }
     }
+
+    device->frame = &device->frames[0];
 
     result = true;
     return result;
@@ -573,12 +609,21 @@ static B32 VK_SurfaceCreate(VK_Device *device, VK_Swapchain *swapchain) {
 
     VK_Context *vk = device->vk;
 
+#if OS_WINDOWS
+    VkWin32SurfaceCreateInfoKHR create_info = {};
+    create_info.sType     = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR;
+    create_info.hinstance = swapchain->surface.win.hinstance;
+    create_info.hwnd      = swapchain->surface.win.hwnd;
+
+    VK_CHECK(vk->CreateWin32SurfaceKHR(vk->instance, &create_info, 0, &swapchain->surface.handle));
+#elif OS_LINUX
     VkWaylandSurfaceCreateInfoKHR create_info = {};
     create_info.sType = VK_STRUCTURE_TYPE_WAYLAND_SURFACE_CREATE_INFO_KHR;
     create_info.display = swapchain->surface.wl.display;
     create_info.surface = swapchain->surface.wl.surface;
 
     VK_CHECK(vk->CreateWaylandSurfaceKHR(vk->instance, &create_info, 0, &swapchain->surface.handle));
+#endif
 
     result = true;
     return result;
@@ -678,23 +723,25 @@ static B32 VK_SwapchainCreate(VK_Device *device, VK_Swapchain *swapchain) {
 
     VkSwapchainKHR old = swapchain->handle;
 
-    VkSwapchainCreateInfoKHR create_info = {};
-    create_info.sType              = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
-    create_info.surface            = swapchain->surface.handle;
-    create_info.minImageCount      = swapchain->images.count;
-    create_info.imageFormat        = swapchain->surface.format.format;
-    create_info.imageColorSpace    = swapchain->surface.format.colorSpace;
-    create_info.imageExtent.width  = width;
-    create_info.imageExtent.height = height;
-    create_info.imageArrayLayers   = 1;
-    create_info.imageUsage         = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
-    create_info.preTransform       = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
-    create_info.compositeAlpha     = surface_composite;
-    create_info.presentMode        = swapchain->vsync ? VK_PRESENT_MODE_FIFO_KHR : swapchain->vsync_disable;
-    create_info.clipped            = VK_FALSE;
-    create_info.oldSwapchain       = old;
+    {
+        VkSwapchainCreateInfoKHR create_info = {};
+        create_info.sType              = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
+        create_info.surface            = swapchain->surface.handle;
+        create_info.minImageCount      = swapchain->images.count;
+        create_info.imageFormat        = swapchain->surface.format.format;
+        create_info.imageColorSpace    = swapchain->surface.format.colorSpace;
+        create_info.imageExtent.width  = width;
+        create_info.imageExtent.height = height;
+        create_info.imageArrayLayers   = 1;
+        create_info.imageUsage         = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+        create_info.preTransform       = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+        create_info.compositeAlpha     = surface_composite;
+        create_info.presentMode        = swapchain->vsync ? VK_PRESENT_MODE_FIFO_KHR : swapchain->vsync_disable;
+        create_info.clipped            = VK_FALSE;
+        create_info.oldSwapchain       = old;
 
-    VK_CHECK(vk->CreateSwapchainKHR(device->handle, &create_info, 0, &swapchain->handle));
+        VK_CHECK(vk->CreateSwapchainKHR(device->handle, &create_info, 0, &swapchain->handle));
+    }
 
     if (old != VK_NULL_HANDLE) {
         // teardown depth resources
