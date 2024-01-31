@@ -402,12 +402,13 @@ static B32 VK_ContextInitialise(VK_Context *vk) {
         // may want
         // descriptorBindingSampledImageUpdateAfterBind for bindless textures
         //
-        features12.sType         = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
-        features12.pNext         = &features11;
-        features12.shaderFloat16 = VK_TRUE;
-        features12.shaderInt8    = VK_TRUE;
-        features12.storageBuffer8BitAccess = VK_TRUE;
+        features12.sType                             = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+        features12.pNext                             = &features11;
+        features12.shaderFloat16                     = VK_TRUE;
+        features12.shaderInt8                        = VK_TRUE;
+        features12.storageBuffer8BitAccess           = VK_TRUE;
         features12.uniformAndStorageBuffer8BitAccess = VK_TRUE;
+        features12.scalarBlockLayout                 = VK_TRUE;
 
         // features from vulkan 1.3
         features13.sType            = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;

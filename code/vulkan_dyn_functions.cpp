@@ -91,6 +91,7 @@
     VK_DYN_FUNCTION(CmdSetScissor);
     VK_DYN_FUNCTION(CmdBindIndexBuffer);
     VK_DYN_FUNCTION(CmdBindDescriptorSets);
+    VK_DYN_FUNCTION(CmdPushConstants);
 
     #undef VK_DEVICE_FUNCTIONS
 #endif

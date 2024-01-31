@@ -2,6 +2,7 @@
 
 #extension GL_EXT_shader_8bit_storage : require
 #extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+#extension GL_EXT_scalar_block_layout : require
 
 struct Vertex {
     float x, y, z;
@@ -14,18 +15,27 @@ struct Vertex {
     uint material_index;
 };
 
+layout(push_constant, scalar, row_major)
+uniform R_Setup {
+    mat4 view_proj;
+
+    vec3  view_p;
+    float time;
+
+    float dt;
+    uint  window_width;
+    uint  window_height;
+
+    float unused[9];
+} setup;
+
+// @todo: make these scalar layout for easier transfer!!
 layout(binding = 0, std430)
 buffer Vertices {
     Vertex vertices[];
 };
 
 layout(binding = 1, std430, row_major)
-buffer Globals {
-    mat4 proj;
-    mat4 view;
-};
-
-layout(binding = 2, std430, row_major)
 buffer Bones {
     mat4 bones[];
 };
@@ -49,10 +59,10 @@ void main() {
     float w4 = 1 - vertex.w[0] - vertex.w[1] - vertex.w[2];
     position += (w4 * (bones[vertex.indices[3]] * vec4(local_position, 1.0)));
 
-    gl_Position = proj * view * vec4(position.xyz, 1.0);
+    gl_Position = setup.view_proj * vec4(position.xyz, 1.0);
 
     frag_uv        = vec2(vertex.u,  vertex.v);
     frag_normal    = vec3(vertex.nx, vertex.ny, vertex.nz);
-    frag_pos       = vec3(vertex.x, vertex.y, vertex.z);
+    frag_pos       = position.xyz;
     material_index = vertex.material_index;
 }

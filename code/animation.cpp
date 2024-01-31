@@ -69,6 +69,8 @@ static void *zmalloc(size_t size) {
 #include "math.cpp"
 #include "vulkan.cpp"
 
+#include "render.h"
+
 // Animation file data
 //
 
@@ -760,7 +762,10 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    SDL_Window *window = SDL_CreateWindow("Animation", 0, 0, 1280, 720, SDL_WINDOW_VULKAN | SDL_WINDOW_ALLOW_HIGHDPI);
+    int wx = SDL_WINDOWPOS_CENTERED;
+    int wy = SDL_WINDOWPOS_CENTERED;
+
+    SDL_Window *window = SDL_CreateWindow("Animation", wx, wy, 1280, 720, SDL_WINDOW_VULKAN | SDL_WINDOW_ALLOW_HIGHDPI);
     if (!window) {
         printf("[ERR] :: failed to create window (%s)\n", SDL_GetError());
         return 1;
@@ -822,7 +827,7 @@ int main(int argc, char **argv) {
         // @todo: allow render target setup to be configured
         // @todo: parse pipeline layout from the spir-v source
         //
-        VkDescriptorSetLayoutBinding bindings[4] = {};
+        VkDescriptorSetLayoutBinding bindings[3] = {};
 
         bindings[0].binding         = 0;
         bindings[0].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
@@ -832,31 +837,35 @@ int main(int argc, char **argv) {
         bindings[1].binding         = 1;
         bindings[1].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         bindings[1].descriptorCount = 1;
-        bindings[1].stageFlags      = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+        bindings[1].stageFlags      = VK_SHADER_STAGE_VERTEX_BIT;
 
         bindings[2].binding         = 2;
         bindings[2].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
         bindings[2].descriptorCount = 1;
-        bindings[2].stageFlags      = VK_SHADER_STAGE_VERTEX_BIT;
-
-        bindings[3].binding         = 4;
-        bindings[3].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        bindings[3].descriptorCount = 1;
-        bindings[3].stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT;
+        bindings[2].stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT;
 
         VkDescriptorSetLayoutCreateInfo create_info = {};
         create_info.sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-        create_info.bindingCount = 4;
+        create_info.bindingCount = 3;
         create_info.pBindings    = bindings;
 
         VK_CHECK(vk->CreateDescriptorSetLayout(device->handle, &create_info, 0, &pipeline.set_layout));
     }
 
     {
+        assert(sizeof(R_Setup) == 128);
+
+        VkPushConstantRange push_constant_range = { 0 };
+        push_constant_range.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+        push_constant_range.offset     = 0;
+        push_constant_range.size       = sizeof(R_Setup);
+
         VkPipelineLayoutCreateInfo create_info = {};
-        create_info.sType          = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-        create_info.setLayoutCount = 1;
-        create_info.pSetLayouts    = &pipeline.set_layout;
+        create_info.sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        create_info.setLayoutCount         = 1;
+        create_info.pSetLayouts            = &pipeline.set_layout;
+        create_info.pushConstantRangeCount = 1;
+        create_info.pPushConstantRanges    = &push_constant_range;
 
         VK_CHECK(vk->CreatePipelineLayout(device->handle, &create_info, 0, &pipeline.layout));
     }
@@ -999,13 +1008,6 @@ int main(int argc, char **argv) {
 
     memcpy(ib.data, mesh.indices, mesh.num_indices * sizeof(U16));
 
-    VK_Buffer gb = {};
-    gb.size        = 2 * sizeof(Mat4x4F);
-    gb.host_mapped = true;
-    gb.usage       = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
-
-    VK_BufferCreate(device, &gb);
-
     VK_Buffer bb = {};
     bb.size        = skeleton.num_bones * sizeof(Mat4x4F);
     bb.host_mapped = true;
@@ -1021,6 +1023,12 @@ int main(int argc, char **argv) {
     VK_BufferCreate(device, &mb);
 
     {
+        // @hack: fix this to be less hacky, we take of the string name from the entire material size,
+        // we should just have a material type for rendering specifically which only has the parameters
+        // we need. some of the material properties will come from textures so don't need to be stored in the
+        // material, but instead a texture index needs to be there for lookup. we need to sort out bindless
+        // textures for that
+        //
         U64 stride = sizeof(A_Material);
         U64 material_size = stride - 16;
 
@@ -1037,7 +1045,7 @@ int main(int argc, char **argv) {
 
     B32 running = true;
 
-    // camera
+    // camera @todo: make this a parameterized structure
     Vec3F x = { 1, 0, 0 };
     Vec3F y = { 0, 1, 0 };
     Vec3F z = { 0, 0, 1 };
@@ -1046,46 +1054,15 @@ int main(int argc, char **argv) {
     B32 w = false, s = false, a = false, d = false;
     B32 space = false, lshift = false;
 
-    F32 pitch = 0, yaw = 0; // (1.5f * M_PI), yaw = 0;
+    F32 pitch = 0, yaw = 0;
 
     U32 index = 0;
-
     U32 animation_index = 0;
 
     // for timing
     F32 delta_time = 0;
+    F32 total_time = 0;
     U64 start = U64TicksGet();
-
-#if 0
-    F32 blend_time = 0;
-    F32 total_blend_time = 0.85f;
-    B32 blending = false;
-
-    U32 from_index = 15;
-    U32 to_index   = 8;
-
-    skeleton.animations[8].num_frames  -= 1; // @hack: fix the animation in blender
-    skeleton.animations[15].num_frames -= 1; // @hack: fix the animation in blender
-#endif
-
-#if 0
-    for (U32 a = 0; a < skeleton.num_animations; ++a) {
-        printf("ANIMATION[%d]\n", a);
-        A_Animation3 *animation = &skeleton.animations[a];
-        for (U32 f = 0; f < animation->num_frames; ++f) {
-            printf("FRAME[%d]\n", f);
-            A_Frame *frame = &animation->frames[f];
-            for (U32 b = 0; b < skeleton.num_bones; ++b) {
-                A_Sample *s = &frame->samples[b];
-                printf("{ { %f, %f, %f }, { %f, %f, %f, %f }, { %f, %f, %f } }\n",
-                        s->position.e[0], s->position.e[1], s->position.e[2],
-                        s->orientation.q.w, s->orientation.q.x, s->orientation.q.y, s->orientation.q.z,
-                        s->scale.e[0], s->scale.e[1], s->scale.e[2]);
-
-            }
-        }
-    }
-#endif
 
     while (running) {
         SDL_Event e;
@@ -1207,15 +1184,20 @@ int main(int argc, char **argv) {
         if (a) { p = V3FAdd(p, V3FMulF32(x, -MOVE_SPEED * delta_time)); }
         else if (d) { p = V3FAdd(p, V3FMulF32(x, MOVE_SPEED * delta_time)); }
 
-        Mat4x4F *proj_view = (Mat4x4F *) gb.data;
-
         F32 aspect = (F32) swapchain->surface.width / (F32) swapchain->surface.height;
 
         Mat4x4FInv proj = M4x4FPerspectiveProjection(2.1445069205f, aspect, 0.01f, 1000.0f);
         Mat4x4FInv view = M4x4FCameraViewProjection(x, y, z, p);
 
-        memcpy(proj_view + 0, &proj.fwd, sizeof(Mat4x4F));
-        memcpy(proj_view + 1, &view.fwd, sizeof(Mat4x4F));
+
+        R_Setup setup;
+
+        setup.view_proj     = M4x4FMul(proj.fwd, view.fwd);
+        setup.view_p        = p;
+        setup.time          = total_time;
+        setup.dt            = delta_time;
+        setup.window_width  = swapchain->surface.width;
+        setup.window_height = swapchain->surface.height;
 
         // Prepare animation ....
         //
@@ -1404,23 +1386,19 @@ int main(int argc, char **argv) {
         }
 
         {
-            VkDescriptorBufferInfo buffer_infos[4] = {};
+            VkDescriptorBufferInfo buffer_infos[3] = {};
 
             buffer_infos[0].buffer = vb.handle;
             buffer_infos[0].offset = 0;
             buffer_infos[0].range  = VK_WHOLE_SIZE;
 
-            buffer_infos[1].buffer = gb.handle;
+            buffer_infos[1].buffer = bb.handle;
             buffer_infos[1].offset = 0;
             buffer_infos[1].range  = VK_WHOLE_SIZE;
 
-            buffer_infos[2].buffer = bb.handle;
+            buffer_infos[2].buffer = mb.handle;
             buffer_infos[2].offset = 0;
             buffer_infos[2].range  = VK_WHOLE_SIZE;
-
-            buffer_infos[3].buffer = mb.handle;
-            buffer_infos[3].offset = 0;
-            buffer_infos[3].range  = VK_WHOLE_SIZE;
 
             VkWriteDescriptorSet writes[4] = {};
 
@@ -1448,18 +1426,12 @@ int main(int argc, char **argv) {
             writes[2].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             writes[2].pBufferInfo     = &buffer_infos[2];
 
-            writes[3].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-            writes[3].dstSet          = set;
-            writes[3].dstBinding      = 4;
-            writes[3].dstArrayElement = 0;
-            writes[3].descriptorCount = 1;
-            writes[3].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            writes[3].pBufferInfo     = &buffer_infos[3];
-
-            vk->UpdateDescriptorSets(device->handle, 4, writes, 0, 0);
+            vk->UpdateDescriptorSets(device->handle, 3, writes, 0, 0);
         }
 
         vk->CmdBindDescriptorSets(cmds, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline.layout, 0, 1, &set, 0, 0);
+        vk->CmdPushConstants(cmds, pipeline.layout,
+                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(R_Setup), &setup);
 
         vk->CmdDrawIndexed(cmds, mesh.num_indices, 1, 0, 0, 0);
 
@@ -1468,6 +1440,8 @@ int main(int argc, char **argv) {
         vk->CmdEndRendering(cmds);
 
         // transition image to present src optimal
+        //
+        // @todo: gather both of these transitions into a single dependency info
         //
         image_barrier.srcStageMask  = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
         image_barrier.dstStageMask  = VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT;
@@ -1541,6 +1515,8 @@ int main(int argc, char **argv) {
 
         U64 end = U64TicksGet();
         delta_time = (F32) F64ElapsedTimeGet(start, end);
+
+        total_time += delta_time;
 
         start = end;
     }
