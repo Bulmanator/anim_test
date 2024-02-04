@@ -14,8 +14,8 @@ struct A_Bone {
 
     U32 parent_index;
 
-    Mat4x4F inv_bind_pose;
-    Quat4F  bind_pose_orientation;
+    Mat4x4F  inv_bind_pose;
+    A_Sample bind_pose;
 };
 
 typedef struct A_Animation A_Animation;

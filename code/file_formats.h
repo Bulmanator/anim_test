@@ -74,12 +74,27 @@ struct AMTS_Header {
 
 StaticAssert(sizeof(AMTS_Header) == 64);
 
+// All frames for all tracks are stored sequentially for easy loading, they are stored interleaved one per bone
+// for each frame in order of the tracks present in the file.
+//
+// samples = all_samples;
+//
+// for tracks {
+//     track->samples = samples;
+//     samples += (header.num_bones * track->num_frames);
+// }
+//
+typedef struct AMTS_Sample AMTS_Sample;
+struct AMTS_Sample {
+    F32 position[3];
+    F32 orientation[4]; // :note quaternion orientation written in wxyz order
+    F32 scale[3];
+};
+
 typedef struct AMTS_BoneInfo AMTS_BoneInfo;
 struct AMTS_BoneInfo {
-    // @todo: change this to just be a sample for bind and inv bind pose, less storage for more info
-    //
-    F32 inv_bind_pose[16]; // in parent space
-    F32 bind_orientation[4];
+    AMTS_Sample bind_pose;
+    AMTS_Sample inv_bind_pose;
 
     U8  parent_index;
     U8  name_count;
@@ -96,23 +111,6 @@ struct AMTS_TrackInfo {
     // has simply perform: (track.num_frames * header.num_bones)
     //
     U32 num_frames;
-};
-
-// All frames for all tracks are stored sequentially for easy loading, they are stored interleaved one per bone
-// for each frame in order of the tracks present in the file.
-//
-// samples = all_samples;
-//
-// for tracks {
-//     track->samples = samples;
-//     samples += (header.num_bones * track->num_frames);
-// }
-//
-typedef struct AMTS_Sample AMTS_Sample;
-struct AMTS_Sample {
-    F32 position[3];
-    F32 orientation[4];
-    F32 scale[3];
 };
 
 #pragma pack(pop)

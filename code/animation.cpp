@@ -292,17 +292,19 @@ static B32 SkeletonFileLoad(Arena *arena, A_Skeleton *skeleton, Str8 path) {
         if (amts.version == AMTS_VERSION) {
             // we have a version we recognise
             //
-            skeleton->string_table.count = amts.string_table.count;
-            skeleton->string_table.data  = ArenaPushCopy(arena, amts.string_table.data, U8, skeleton->string_table.count);
+            Str8 string_table;
+            string_table.count = amts.string_table.count;
+            string_table.data  = ArenaPushCopy(arena, amts.string_table.data, U8, string_table.count);
 
-            skeleton->framerate = amts.framerate;
+            skeleton->string_table = string_table;
+            skeleton->framerate    = amts.framerate;
 
-            // @todo: this doesn't need to be a U8 anymore
-            //
-            skeleton->num_bones      = cast(U8) amts.num_bones;
+            skeleton->num_bones      = amts.num_bones;
             skeleton->num_animations = amts.num_tracks;
 
             skeleton->bones = ArenaPush(arena, A_Bone, skeleton->num_bones);
+
+            Assert(sizeof(AMTS_Sample) == sizeof(A_Sample));
 
             for (U32 it = 0; it < skeleton->num_bones; ++it) {
                 AMTS_BoneInfo *src = &amts.bones[it];
@@ -311,26 +313,25 @@ static B32 SkeletonFileLoad(Arena *arena, A_Skeleton *skeleton, Str8 path) {
                 dst->parent_index = src->parent_index;
 
                 dst->name.count = src->name_count;
-                dst->name.data  = &skeleton->string_table.data[src->name_offset];
+                dst->name.data  = &string_table.data[src->name_offset];
 
-                memcpy(dst->inv_bind_pose.e, src->inv_bind_pose, 16 * sizeof(F32));
-                memcpy(&dst->bind_pose_orientation, src->bind_orientation, sizeof(Quat4F));
+                A_Sample inv_bind_pose;
+
+                memcpy(&dst->bind_pose, &src->bind_pose,     sizeof(AMTS_Sample));
+                memcpy(&inv_bind_pose,  &src->inv_bind_pose, sizeof(AMTS_Sample));
+
+                dst->inv_bind_pose = A_SampleToM4x4F(&inv_bind_pose);
             }
-
-            // @todo: clean this up, the A_Sample and AMTS_Sample are basically the same thing
-            //
-            skeleton->animations = ArenaPush(arena, A_Animation, skeleton->num_animations);
-
-            Assert(sizeof(AMTS_Sample) == sizeof(A_Sample));
 
             A_Sample *samples = ArenaPushCopy(arena, amts.samples, A_Sample, amts.total_samples);
 
+            skeleton->animations = ArenaPush(arena, A_Animation, skeleton->num_animations);
             for (U32 it = 0; it < skeleton->num_animations; ++it) {
                 AMTS_TrackInfo *track     = &amts.tracks[it];
                 A_Animation    *animation = &skeleton->animations[it];
 
                 animation->name.count = track->name_count;
-                animation->name.data  = &skeleton->string_table.data[track->name_offset];
+                animation->name.data  = &string_table.data[track->name_offset];
 
                 animation->time       = 0;
                 animation->time_scale = 1;
@@ -429,7 +430,7 @@ int main(int argc, char **argv) {
     //const char *skel_path = "../test/skeleton/ninja_female_01.anim";
 
     const char *mesh_path = "../test/George.amtm";
-    const char *skel_path = "../test/other.amts";
+    const char *skel_path = "../test/George.amts";
 #endif
 
     // reserve a 64 gib arena
@@ -700,6 +701,8 @@ int main(int argc, char **argv) {
 
     // for vertex data
     //
+    // @todo: staging buffer!
+    //
 
     VK_Buffer vb = {};
     vb.size        = mesh.num_vertices * sizeof(SkinnedVertex3);
@@ -898,7 +901,6 @@ int main(int argc, char **argv) {
 
         Mat4x4FInv proj = M4x4FPerspectiveProjection(2.1445069205f, aspect, 0.01f, 1000.0f);
         Mat4x4FInv view = M4x4FCameraViewProjection(x, y, z, p);
-
 
         R_Setup setup;
 

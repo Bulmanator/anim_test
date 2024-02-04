@@ -50,25 +50,23 @@ MATERIAL_PROPERTIES = [
 # Skeleton storage classes
 
 class A_Bone:
-    def __init__(self, inv_bind_pose, bind_pose_orientation, parent_index, name_count, name_offset):
-        self.inv_bind_pose_matrix  = inv_bind_pose
-        self.bind_pose_orientation = bind_pose_orientation
-        self.parent_index          = parent_index
-        self.name_count            = name_count
-        self.name_offset           = name_offset
+    def __init__(self, bind_pose, inv_bind_pose, parent_index, name_count, name_offset):
+        self.bind_pose     = bind_pose
+        self.inv_bind_pose = inv_bind_pose
+        self.parent_index  = parent_index
+        self.name_count    = name_count
+        self.name_offset   = name_offset
 
     def Write(self, file):
-        # Write inverse bind pose matrix
-        for v in self.inv_bind_pose_matrix:
-            for f in v:
-                F32Write(file, f)
+        # Write bind pose sample
+        for p in self.bind_pose.to_translation(): F32Write(file, p)
+        for o in self.bind_pose.to_quaternion():  F32Write(file, o)
+        for s in self.bind_pose.to_scale():       F32Write(file, s)
 
-        # Write bind pose orientation
-        # @todo: might want the full bind pose transform instead
-        F32Write(file, self.bind_pose_orientation.x)
-        F32Write(file, self.bind_pose_orientation.y)
-        F32Write(file, self.bind_pose_orientation.z)
-        F32Write(file, self.bind_pose_orientation.w)
+        # Write inverse bind pose sample
+        for p in self.inv_bind_pose.to_translation(): F32Write(file, p)
+        for o in self.inv_bind_pose.to_quaternion():  F32Write(file, o)
+        for s in self.inv_bind_pose.to_scale():       F32Write(file, s)
 
         # Write parent index
         U8Write(file, self.parent_index)
@@ -92,22 +90,10 @@ class A_Track:
         U32Write(file, self.num_frames)
 
     def WriteSamples(self, file):
-        for s in self.samples:
-            position = s.to_translation()
-            F32Write(file, position.x)
-            F32Write(file, position.y)
-            F32Write(file, position.z)
-
-            orientation = s.to_quaternion()
-            F32Write(file, orientation.x)
-            F32Write(file, orientation.y)
-            F32Write(file, orientation.z)
-            F32Write(file, orientation.w)
-
-            scale = s.to_scale()
-            F32Write(file, scale.x)
-            F32Write(file, scale.y)
-            F32Write(file, scale.z)
+        for sample in self.samples:
+            for p in sample.to_translation(): F32Write(file, p)
+            for o in sample.to_quaternion():  F32Write(file, o)
+            for s in sample.to_scale():       F32Write(file, s)
 
 # Mesh storage classes
 
@@ -356,9 +342,8 @@ def A_BonesGet(bones, string_table, armature, axis_mapping_matrix):
     for b in armature.data.bones:
         parent_index = armature.data.bones.find(b.parent.name) if b.parent else 0xFF
 
-        bind_pose_matrix      = axis_mapping_matrix @ b.matrix_local
-        bind_pose_orientation = bind_pose_matrix.to_quaternion()
-        inv_bind_pose_matrix  = bind_pose_matrix.inverted()
+        bind_pose_matrix     = axis_mapping_matrix @ b.matrix_local
+        inv_bind_pose_matrix = bind_pose_matrix.inverted()
 
         name = b.name.encode('utf-8')
 
@@ -368,7 +353,7 @@ def A_BonesGet(bones, string_table, armature, axis_mapping_matrix):
         string_table_offset += name_count
         string_table.append(name)
 
-        bone = A_Bone(inv_bind_pose_matrix, bind_pose_orientation, parent_index, name_count, name_offset)
+        bone = A_Bone(bind_pose_matrix, inv_bind_pose_matrix, parent_index, name_count, name_offset)
         bones.append(bone)
 
 def A_TracksGet(tracks, string_table, armature, axis_mapping_matrix):
@@ -421,7 +406,7 @@ def A_SkeletonExport():
     armature = armatures[0]
 
     # So we can restore the original state after exporting
-    base_pose   = ArmaturePoseSet(armatures, "POSE")
+    base_pose   = ArmaturePoseSet(armature, "POSE")
     base_action = armature.animation_data.action
     base_frame  = bpy.context.scene.frame_current
 
@@ -628,7 +613,6 @@ def R_MeshExport():
     for i in indices:
         U16Write(file_handle, i)
 
-
     return { 'FINISHED' }
 
 # Blender specific export classes
@@ -644,7 +628,7 @@ class AmtExporter(bpy.types.Operator):
     bl_label  = "Export"
 
     def execute(self, context):
-        return R_MeshExport()
+        return A_SkeletonExport()
 
 
 class ExportPanel(bpy.types.Panel):

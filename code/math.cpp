@@ -20,7 +20,7 @@ struct Mat4x4FInv {
 };
 
 struct Quat4F {
-    F32 x, y, z, w;
+    F32 w, x, y, z;
 };
 
 static Vec3F V3FLerp(Vec3F a, Vec3F b, F32 t) {
