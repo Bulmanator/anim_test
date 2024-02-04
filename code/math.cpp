@@ -300,7 +300,7 @@ static Quat4F Q4FNLerp(Quat4F a, Quat4F b, F32 t) {
 
     return result;
 }
-static Mat4x4F Q4FToMatrix(Quat4F q) {
+static Mat4x4F Q4FToM4x4F(Quat4F q) {
     Mat4x4F result;
 
     F32 xx = (q.x * q.x);

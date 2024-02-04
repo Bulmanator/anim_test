@@ -27,67 +27,12 @@ static void *zmalloc(size_t size) {
 #include "render.h"
 
 #include "file_formats.h"
+#include "animation.h"
 
 // Animation file data
 //
 
 #pragma pack(push, 1)
-
-struct A_Sample {
-    union {
-        F32   e[3];
-        Vec3F v;
-    } position;
-
-    union {
-        F32    e[4];
-        Quat4F q;
-    } orientation;
-
-    union {
-        F32   e[3];
-        Vec3F v;
-    } scale;
-};
-
-struct A_Frame {
-    A_Sample *samples; // num_bones in length
-};
-
-struct A_Animation3 {
-    U32 num_frames;
-    A_Frame *frames;
-
-    Str8 name;
-
-    F32 time;
-    F32 time_scale; // speed up or slow down
-};
-
-struct A_Bone {
-    U8 parent_index;
-
-    Str8 name;
-
-    union {
-        F32     e[16];
-        Mat4x4F m;
-    } inv_bind_pose;
-
-    Quat4F bind_pose_orientation;
-};
-
-struct A_Skeleton {
-    U32 framerate;
-
-    Str8 string_table;
-
-    U8 num_bones;
-    A_Bone *bones;
-
-    U32 num_animations;
-    A_Animation3 *animations;
-};
 
 // Mesh file
 //
@@ -316,61 +261,6 @@ static B32 MeshFileLoad(A_Mesh *mesh, const char *path) {
 }
 #endif
 
-#if 0
-static void AnimationFileLoad(A_Animation3 *animation, U32 num_bones, FILE *f) {
-    fread(&animation->num_frames, sizeof(U32), 1, f);
-
-    U32 name_count;
-    fread(&name_count, sizeof(U32), 1, f);
-
-    animation->name.count = name_count;
-    animation->name.data  = (U8 *) zmalloc(animation->name.count);
-
-    fread(animation->name.data, animation->name.count, 1, f);
-
-    animation->frames = (A_Frame *) zmalloc(animation->num_frames * sizeof(A_Frame));
-
-    for (U32 it = 0; it < animation->num_frames; ++it) {
-        A_Frame *frame = &animation->frames[it];
-
-        frame->samples = (A_Sample *) zmalloc(num_bones * sizeof(A_Sample));
-        fread(frame->samples, sizeof(A_Sample), num_bones, f);
-    }
-
-    animation->time       = 0;
-    animation->time_scale = 1;
-}
-
-static B32 SkeletonFileLoad(A_Skeleton *skeleton, const char *path) {
-    B32 result = false;
-
-    FILE *f = fopen(path, "rb");
-    if (f) {
-        fread(&skeleton->num_bones, sizeof(U8), 1, f);
-
-        skeleton->bones = (A_Bone *) zmalloc(skeleton->num_bones * sizeof(A_Bone));
-        fread(skeleton->bones, sizeof(A_Bone), skeleton->num_bones, f);
-        fread(&skeleton->num_animations, sizeof(U32), 1, f);
-
-        for (U32 it = 0; it < skeleton->num_bones; ++it) {
-            printf("Bone[%d] -> parent %d\n", it, skeleton->bones[it].parent_index);
-        }
-
-        skeleton->animations = (A_Animation3 *) zmalloc(skeleton->num_animations * sizeof(A_Animation3));
-
-        for (U32 it = 0; it < skeleton->num_animations; ++it) {
-            AnimationFileLoad(&skeleton->animations[it], skeleton->num_bones, f);
-        }
-
-        fclose(f);
-
-        result = true;
-    }
-
-    return result;
-}
-#else
-
 static B32 SkeletonFileLoad(Arena *arena, A_Skeleton *skeleton, Str8 path) {
     B32 result = false;
 
@@ -429,7 +319,7 @@ static B32 SkeletonFileLoad(Arena *arena, A_Skeleton *skeleton, Str8 path) {
 
             // @todo: clean this up, the A_Sample and AMTS_Sample are basically the same thing
             //
-            skeleton->animations = ArenaPush(arena, A_Animation3, skeleton->num_animations);
+            skeleton->animations = ArenaPush(arena, A_Animation, skeleton->num_animations);
 
             Assert(sizeof(AMTS_Sample) == sizeof(A_Sample));
 
@@ -437,7 +327,7 @@ static B32 SkeletonFileLoad(Arena *arena, A_Skeleton *skeleton, Str8 path) {
 
             for (U32 it = 0; it < skeleton->num_animations; ++it) {
                 AMTS_TrackInfo *track     = &amts.tracks[it];
-                A_Animation3   *animation = &skeleton->animations[it];
+                A_Animation    *animation = &skeleton->animations[it];
 
                 animation->name.count = track->name_count;
                 animation->name.data  = &skeleton->string_table.data[track->name_offset];
@@ -445,18 +335,10 @@ static B32 SkeletonFileLoad(Arena *arena, A_Skeleton *skeleton, Str8 path) {
                 animation->time       = 0;
                 animation->time_scale = 1;
 
-                // @todo: remove A_Frame type, we can just offset directly into the array without the
-                // need for this!! extra allocation overhead etc.
-                //
                 animation->num_frames = track->num_frames;
-                animation->frames     = ArenaPush(arena, A_Frame, animation->num_frames);
+                animation->samples    = samples;
 
-                for (U32 f = 0; f < animation->num_frames; ++f) {
-                    A_Frame *frame = &animation->frames[f];
-
-                    frame->samples = samples;
-                    samples += skeleton->num_bones;
-                }
+                samples += (animation->num_frames * skeleton->num_bones);
             }
         }
 
@@ -467,130 +349,6 @@ static B32 SkeletonFileLoad(Arena *arena, A_Skeleton *skeleton, Str8 path) {
 
     return result;
 }
-
-#if 0
-static B32 SkeletonFileLoad(A_Skeleton *skeleton, const char *path) {
-    B32 result = false;
-
-    FILE *f = fopen(path, "rb");
-    if (f) {
-        U32 magic, version;
-        fread(&magic,   sizeof(U32), 1, f);
-        fread(&version, sizeof(U32), 1, f);
-
-        if (magic != 0x53544D41) {
-            printf("[error] :: file is not a AMTS file\n");
-            return result;
-        }
-
-        if (version != 1) {
-            printf("[error] :: incompatible file version\n");
-            return result;
-        }
-
-        U32 num_bones, num_tracks;
-        U32 total_samples;
-        U32 frame_rate;
-        U32 string_table_count;
-
-        fread(&num_bones,          sizeof(U32), 1, f);
-        fread(&num_tracks,         sizeof(U32), 1, f);
-        fread(&total_samples,      sizeof(U32), 1, f);
-        fread(&frame_rate,         sizeof(U32), 1, f);
-        fread(&string_table_count, sizeof(U32), 1, f);
-
-        fseek(f, 9 * sizeof(U32), SEEK_CUR);
-
-        char magic_c[4] = {};
-        memcpy(magic_c, &magic, 4);
-
-        printf("Header {\n");
-        printf("  - magic              = %c%c%c%c (0x%x)\n", magic_c[0], magic_c[1], magic_c[2], magic_c[3], magic);
-        printf("  - version            = %d\n", version);
-        printf("  - num_bones          = %d\n", num_bones);
-        printf("  - num_tracks         = %d\n", num_tracks);
-        printf("  - total_samples      = %d\n", total_samples);
-        printf("  - frame_rate         = %d\n", frame_rate);
-        printf("  - string_table_count = %d\n", string_table_count);
-        printf("}\n");
-
-        skeleton->string_table.count = string_table_count;
-        skeleton->string_table.data  = (U8 *) malloc(string_table_count);
-
-        fread(skeleton->string_table.data, string_table_count, 1, f);
-
-        skeleton->num_bones      = (U8) num_bones;
-        skeleton->num_animations = num_tracks;
-
-        skeleton->bones = (A_Bone *) malloc(num_bones * sizeof(A_Bone));
-
-        for (U32 it = 0; it < num_bones; ++it) {
-            A_Bone *bone = &skeleton->bones[it];
-
-            fread(&bone->inv_bind_pose.m,       sizeof(Mat4x4F), 1, f);
-            fread(&bone->bind_pose_orientation, sizeof(Quat4F),  1, f);
-
-            U8 parent, name_count;
-            U16 name_offset;
-
-            fread(&parent,      sizeof(U8),  1, f);
-            fread(&name_count,  sizeof(U8),  1, f);
-            fread(&name_offset, sizeof(U16), 1, f);
-
-            bone->parent_index = parent;
-            bone->name.count   = name_count;
-            bone->name.data    = &skeleton->string_table.data[name_offset];
-
-            printf("Bone[%d]: %.*s -> %u\n", it, (U32) bone->name.count, bone->name.data, parent);
-        }
-
-        skeleton->animations = (A_Animation3 *) malloc(num_tracks * sizeof(A_Animation3));
-
-        for (U32 it = 0; it < num_tracks; ++it) {
-            A_Animation3 *animation = &skeleton->animations[it];
-
-            U8 flags, name_count;
-            U16 name_offset;
-            U32 num_frames;
-
-            fread(&flags,       sizeof(U8),  1, f);
-            fread(&name_count,  sizeof(U8),  1, f);
-            fread(&name_offset, sizeof(U16), 1, f);
-            fread(&num_frames,  sizeof(U32), 1, f);
-
-            // samples filled out later
-            //
-            animation->num_frames = num_frames;
-            animation->frames     = (A_Frame *) malloc(num_frames * sizeof(A_Frame));
-
-            animation->name.count = name_count;
-            animation->name.data  = &skeleton->string_table.data[name_offset];
-
-            animation->time       = 0;
-            animation->time_scale = 1;
-
-            printf("Animation[%d]: %.*s (%d frames)\n", it, (U32) animation->name.count, animation->name.data, animation->num_frames);
-        }
-
-        A_Sample *samples = (A_Sample *) malloc(total_samples * sizeof(A_Sample));
-        fread(samples, sizeof(A_Sample), total_samples, f);
-
-        for (U32 it = 0; it < num_tracks; ++it) {
-            A_Animation3 *animation = &skeleton->animations[it];
-
-            for (U32 frame = 0; frame < animation->num_frames; ++frame) {
-                animation->frames[frame].samples = samples;
-                samples += num_bones;
-            }
-        }
-
-        result = true;
-    }
-
-    return result;
-}
-#endif
-#endif
 
 static Str8 FileReadAll(const char *path) {
     Str8 result = {};
@@ -608,122 +366,6 @@ static Str8 FileReadAll(const char *path) {
     }
 
     return result;
-}
-
-static Mat4x4F AnimationSampleToMatrix(A_Sample *sample) {
-    Mat4x4F result;
-
-    result = Q4FToMatrix(sample->orientation.q);
-
-    result.m[0][0] *= sample->scale.e[0];
-    result.m[0][1] *= sample->scale.e[0];
-    result.m[0][2] *= sample->scale.e[0];
-
-    result.m[1][0] *= sample->scale.e[1];
-    result.m[1][1] *= sample->scale.e[1];
-    result.m[1][2] *= sample->scale.e[1];
-
-    result.m[2][0] *= sample->scale.e[2];
-    result.m[2][1] *= sample->scale.e[2];
-    result.m[1][2] *= sample->scale.e[2];
-
-    result = M4x4FTranslateV3F(result, sample->position.v);
-
-    return result;
-}
-
-static A_Sample AnimationSampleLerp(A_Sample *from, A_Sample *to, F32 t) {
-    A_Sample result;
-
-    result.position.v = V3FLerp(from->position.v, to->position.v, t);
-    result.scale.v    = V3FLerp(from->scale.v, to->scale.v, t);
-
-    if (Q4FDot(from->orientation.q, to->orientation.q) < 0) {
-        // double cover
-        //
-        // @todo: we need to properly interpret the mode and dot with the rest pose orientation
-        // instead this allows for order-indpendent blending
-        //
-        result.orientation.q = Q4FNLerp(from->orientation.q, Q4FNeg(to->orientation.q), t);
-    }
-    else {
-        result.orientation.q = Q4FNLerp(from->orientation.q, to->orientation.q, t);
-    }
-
-    return result;
-}
-
-static void AnimationEvaluate(A_Skeleton *skeleton, A_Animation3 *animation, F32 dt, A_Sample *samples) { // one sample per bone in skeleton
-    // @todo: write the actual framerate to the animation file from blender, assumes 24fps for now
-    //
-    // @fix: we have the frame rate!!
-    //
-#define FRAME_RATE 30.0f
-    F32 total_time = (1.0f / FRAME_RATE) * animation->num_frames;
-
-    animation->time += (animation->time_scale * dt);
-
-    // @todo: just calculate the number of times we need to take away if the time gets large for whatever reason
-    while (animation->time >= total_time) { animation->time -= total_time; }
-
-    U32 frame_index0 = (U32) ((animation->time / total_time) * animation->num_frames);
-    U32 frame_index1 = (frame_index0 + 1) % animation->num_frames;
-
-    if (frame_index1 >= animation->num_frames) {
-        // only sample the final frame
-        // this currently never happens becuase of the mod..
-        //
-        // the animations, even ones that don't look like they are supposed to loop, seem to look okay
-        // even on the final frames.. so maybe this isn't needed?
-        //
-        // @todo: flag animations as looping and then we can safely sample back to the position
-        //
-        assert(frame_index0 < animation->num_frames);
-
-        A_Frame *frame0 = &animation->frames[frame_index0];
-
-        for (U32 it = 0; it < skeleton->num_bones; ++it) {
-            samples[it] = frame0->samples[it];
-        }
-    }
-    else {
-        A_Frame *frame0 = &animation->frames[frame_index0];
-        A_Frame *frame1 = &animation->frames[frame_index1];
-
-        // @todo: is this t calculation correct?
-        //
-        F32 t = (animation->time - ((1.0f / FRAME_RATE) * frame_index0)) * FRAME_RATE;
-
-        for (U32 it = 0; it < skeleton->num_bones; ++it) {
-            samples[it] = AnimationSampleLerp(&frame0->samples[it], &frame1->samples[it], t);
-        }
-    }
-}
-
-static void AnimationBoneMatricesGet(A_Skeleton *skeleton, A_Sample *samples, Mat4x4F *bone_matrices) {
-    for (U32 it = 0; it < skeleton->num_bones; ++it) {
-        A_Bone *bone = &skeleton->bones[it];
-
-        if (bone->parent_index == 0xFF) { // @nocheckin!!!!!!! BAD
-            // root bone
-            //
-            bone_matrices[it] = AnimationSampleToMatrix(&samples[it]);
-        }
-        else {
-            assert(bone->parent_index < it);
-
-            Mat4x4F transform = AnimationSampleToMatrix(&samples[it]);
-            bone_matrices[it] = M4x4FMul(bone_matrices[bone->parent_index], transform);
-        }
-    }
-
-    // we must do this in a second pass becuase the original sample matrix may be used by
-    // child bones to calculate their final transforms
-    //
-    for (U32 it = 0; it < skeleton->num_bones; ++it) {
-        A_Bone *bone = &skeleton->bones[it];
-        bone_matrices[it] = M4x4FMul(bone_matrices[it], bone->inv_bind_pose.m);
-    }
 }
 
 #if OS_WINDOWS
@@ -822,7 +464,7 @@ int main(int argc, char **argv) {
 
     printf("\nAnimations:\n");
     for (U32 it = 0; it < skeleton.num_animations; ++it) {
-        A_Animation3 *animation = &skeleton.animations[it];
+        A_Animation *animation = &skeleton.animations[it];
         printf("  [%d]: %.*s\t(%d frames)\n", it, (U32) animation->name.count, animation->name.data, animation->num_frames);
     }
 
@@ -1269,101 +911,21 @@ int main(int argc, char **argv) {
 
         // Prepare animation ....
         //
-#if 1
-        {
-            A_Animation3 *animation = &skeleton.animations[animation_index];
-
+        TempArena temp;
+        DeferLoop(temp = TempGet(0, 0), TempRelease(&temp)) {
             // @todo: would love to calculate these directly into the mapped buffer, however,
             // mapped gpu memory may be in write-combined memory and you _really_ don't want
             // to be reading from that. as the calculations require lookups of the parent samples
             // this is a no go
             //
-            Mat4x4F  *bone_matrices = (Mat4x4F *)  zmalloc(skeleton.num_bones * sizeof(Mat4x4F));
-            A_Sample *samples       = (A_Sample *) zmalloc(skeleton.num_bones * sizeof(A_Sample));
+            Mat4x4F  *bone_matrices = ArenaPush(temp.arena, Mat4x4F,  skeleton.num_bones);
+            A_Sample *samples       = ArenaPush(temp.arena, A_Sample, skeleton.num_bones);
 
-            AnimationEvaluate(&skeleton, animation, delta_time, samples);
-            AnimationBoneMatricesGet(&skeleton, samples, bone_matrices);
-
-            memcpy(bb.data, bone_matrices, skeleton.num_bones * sizeof(Mat4x4F));
-
-            free(samples);
-            free(bone_matrices);
-        }
-#else
-        {
-            A_Animation3 *animation_from = &skeleton.animations[from_index];
-            A_Animation3 *animation_to   = &skeleton.animations[to_index];
-
-            // @todo: would love to calculate these directly into the mapped buffer, however,
-            // mapped gpu memory may be in write-combined memory and you _really_ don't want
-            // to be reading from that. as the calculations require lookups of the parent samples
-            // this is a no go
-            //
-            Mat4x4F  *bone_matrices = (Mat4x4F *)  zmalloc(skeleton.num_bones * sizeof(Mat4x4F));
-            A_Sample *samples       = (A_Sample *) zmalloc(skeleton.num_bones * sizeof(A_Sample));
-
-            blend_time += (animation_from->time_scale * delta_time);
-
-            F32 blend_t = (blend_time / total_blend_time);
-
-            F32 total_time = (1.0f / 24.0f) * animation_from->num_frames;
-            U32 current_frame = (U32) ((animation_from->time / total_time) * animation_from->num_frames);
-            U32 sync_frame    = 6;
-
-            if (!blending && (current_frame == sync_frame)) {
-                blending = true;
-
-                // @incomplete: this has a glitchy frame in it.... figure out how to blend between
-                // two animations and then back again
-                //
-
-                animation_to->time = (sync_frame * (1.0f / 24.0f));
-
-                U32 tmp = from_index;
-
-                from_index = to_index;
-                to_index   = tmp;
-
-                animation_from = &skeleton.animations[from_index];
-                animation_to   = &skeleton.animations[to_index];
-
-                blend_time = 0;
-                blend_t    = 0;
-            }
-
-            // this assumes that all parents are evaluated before their children, this should be relatively
-            // easy to validate on export of the skeleton from blender!
-            //
-            if (!blending && (current_frame != sync_frame)) {
-                AnimationEvaluate(&skeleton, animation_from, delta_time, samples);
-            }
-
-            if (blend_t <= 1) {
-                A_Sample *samples_from = (A_Sample *) zmalloc(skeleton.num_bones * sizeof(A_Sample));
-                A_Sample *samples_to   = (A_Sample *) zmalloc(skeleton.num_bones * sizeof(A_Sample));
-
-                AnimationEvaluate(&skeleton, animation_from, delta_time, samples_from);
-                AnimationEvaluate(&skeleton, animation_to, delta_time, samples_to);
-
-                for (U32 it = 0; it < skeleton.num_bones; ++it) {
-                    samples[it] = AnimationSampleLerp(&samples_from[it], &samples_to[it], blend_t);
-                }
-
-                free(samples_from);
-                free(samples_to);
-            }
-            else {
-                AnimationEvaluate(&skeleton, animation_to, delta_time, samples);
-            }
-
-            AnimationBoneMatricesGet(&skeleton, samples, bone_matrices);
+            A_AnimationEvaluate(samples, &skeleton, animation_index, delta_time);
+            A_AnimationBoneMatricesGet(bone_matrices, &skeleton, samples);
 
             memcpy(bb.data, bone_matrices, skeleton.num_bones * sizeof(Mat4x4F));
-
-            free(samples);
-            free(bone_matrices);
         }
-#endif
 
         VkCommandBuffer cmds = VK_CommandBufferPush(vk, frame);
 
@@ -1591,6 +1153,115 @@ int main(int argc, char **argv) {
     }
 
     return 0;
+}
+
+// animation.c
+//
+Mat4x4F A_SampleToM4x4F(A_Sample *sample) {
+    // @speed: simd?
+    //
+    Mat4x4F result = Q4FToM4x4F(sample->orientation);
+
+    result.m[0][0] *= sample->scale.x;
+    result.m[0][1] *= sample->scale.x;
+    result.m[0][2] *= sample->scale.x;
+
+    result.m[1][0] *= sample->scale.y;
+    result.m[1][1] *= sample->scale.y;
+    result.m[1][2] *= sample->scale.y;
+
+    result.m[2][0] *= sample->scale.z;
+    result.m[2][1] *= sample->scale.z;
+    result.m[1][2] *= sample->scale.z;
+
+    result = M4x4FTranslateV3F(result, sample->position);
+
+    return result;
+}
+
+A_Sample A_SampleLerp(A_Sample *a, A_Sample *b, F32 t) {
+    A_Sample result;
+
+    result.position = V3FLerp(a->position, b->position, t);
+    result.scale    = V3FLerp(a->scale,    b->scale,    t);
+
+    if (Q4FDot(a->orientation, b->orientation) < 0) {
+        // double cover
+        //
+        // @todo: we need to properly interpret the mode and dot with the rest pose orientation
+        // instead this allows for order-indpendent blending
+        //
+        result.orientation = Q4FNLerp(a->orientation, Q4FNeg(b->orientation), t);
+    }
+    else {
+        result.orientation = Q4FNLerp(a->orientation, b->orientation, t);
+    }
+
+    return result;
+}
+
+A_Sample *A_AnimationSamplesForFrame(A_Animation *animation, U32 num_bones, U32 frame_index) {
+    A_Sample *result = &animation->samples[num_bones * frame_index];
+    return result;
+}
+
+void A_AnimationEvaluate(A_Sample *output_samples, A_Skeleton *skeleton, U32 animation_index, F32 dt) {
+    Assert(animation_index < skeleton->num_animations);
+
+    A_Animation *animation = &skeleton->animations[animation_index];
+
+    F32 framerate     = cast(F32) skeleton->framerate;
+    F32 inv_framerate = 1.0f / framerate;
+
+    F32 total_time   = inv_framerate * animation->num_frames;
+    animation->time += (animation->time_scale * dt);
+
+    if (animation->time >= total_time) {
+        animation->time -= cast(U32) (animation->time / total_time) * total_time;
+    }
+
+    // @todo: might want to have a flag on the animations to see whether it loops or should stop on the
+    // final frame
+    //
+    U32 frame_index0 = (U32) ((animation->time / total_time) * animation->num_frames);
+    U32 frame_index1 = (frame_index0 + 1) % animation->num_frames;
+
+    // @todo: is this t calculation correct?
+    //
+    F32 t = (animation->time - (inv_framerate * frame_index0)) * framerate;
+
+    A_Sample *frame0 = A_AnimationSamplesForFrame(animation, skeleton->num_bones, frame_index0);
+    A_Sample *frame1 = A_AnimationSamplesForFrame(animation, skeleton->num_bones, frame_index1);
+
+    for (U32 it = 0; it < skeleton->num_bones; ++it) {
+        output_samples[it] = A_SampleLerp(&frame0[it], &frame1[it], t);
+    }
+}
+
+void A_AnimationBoneMatricesGet(Mat4x4F *output_matrices, A_Skeleton *skeleton, A_Sample *samples) {
+    for (U32 it = 0; it < skeleton->num_bones; ++it) {
+        A_Bone *bone = &skeleton->bones[it];
+
+        if (bone->parent_index == 0xFF) {
+            // root bone
+            //
+            output_matrices[it] = A_SampleToM4x4F(&samples[it]);
+        }
+        else {
+            assert(bone->parent_index < it);
+
+            Mat4x4F transform   = A_SampleToM4x4F(&samples[it]);
+            output_matrices[it] = M4x4FMul(output_matrices[bone->parent_index], transform);
+        }
+    }
+
+    // we must do this in a second pass becuase the original sample matrix may be used by
+    // child bones to calculate their final transforms
+    //
+    for (U32 it = 0; it < skeleton->num_bones; ++it) {
+        A_Bone *bone = &skeleton->bones[it];
+        output_matrices[it] = M4x4FMul(output_matrices[it], bone->inv_bind_pose);
+    }
 }
 
 #include "file_formats.c"
