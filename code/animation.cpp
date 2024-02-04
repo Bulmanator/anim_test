@@ -11,53 +11,8 @@
 #include <SDL2/SDL_vulkan.h>
 #include <SDL2/SDL_syswm.h>
 
-typedef uint8_t  U8;
-typedef uint16_t U16;
-typedef uint32_t U32;
-typedef uint64_t U64;
-
-typedef int8_t  S8;
-typedef int16_t S16;
-typedef int32_t S32;
-typedef int64_t S64;
-
-typedef int8_t  B8;
-typedef int16_t B16;
-typedef int32_t B32;
-typedef int64_t B64;
-
-typedef float  F32;
-typedef double F64;
-
-struct Str8 {
-    S64 count;
-    U8 *data;
-};
-
-// operating system detection
-//
-#define OS_WINDOWS 0
-#define OS_LINUX   0
-
-#if defined(_WIN32)
-    #undef  OS_WINDOWS
-    #define OS_WINDOWS 1
-#elif defined(__linux__)
-    #undef  OS_LINUX
-    #define OS_LINUX 1
-#endif
-
-#if OS_WINDOWS
-    // @todo: do we really want to include windows.h
-    #include <windows.h>
-#elif OS_LINUX
-    #include <dlfcn.h>
-#endif
-
-#define STRINGIFY(x) #x
-
-#define MIN(a, b) ((a) < (b) ? (a) : (b))
-#define MAX(a, b) ((a) > (b) ? (a) : (b))
+#define CORE_IMPL 1
+#include "core.h"
 
 static void *zmalloc(size_t size) {
     void *result = malloc(size);
@@ -70,6 +25,8 @@ static void *zmalloc(size_t size) {
 #include "vulkan.cpp"
 
 #include "render.h"
+
+#include "file_formats.h"
 
 // Animation file data
 //
@@ -121,6 +78,8 @@ struct A_Bone {
 };
 
 struct A_Skeleton {
+    U32 framerate;
+
     Str8 string_table;
 
     U8 num_bones;
@@ -411,6 +370,105 @@ static B32 SkeletonFileLoad(A_Skeleton *skeleton, const char *path) {
     return result;
 }
 #else
+
+static B32 SkeletonFileLoad(Arena *arena, A_Skeleton *skeleton, Str8 path) {
+    B32 result = false;
+
+    TempArena temp = TempGet(0, 0);
+
+    // path may or may not already be zero terminated, do this to make sure it is
+    //
+    // at the moment we know it is always zero terminated, however, in the future this might not be the case
+    //
+    char *zpath = ArenaPush(temp.arena, char, path.count + 1);
+    memcpy(zpath, path.data, path.count); // @todo: add MemoryCopy or something function to core
+
+    FILE *handle = fopen(zpath, "rb");
+    if (handle) {
+        Str8 data;
+
+        fseek(handle, 0, SEEK_END);
+        data.count = ftell(handle);
+        fseek(handle, 0, SEEK_SET);
+
+        data.data = ArenaPush(temp.arena, U8, data.count, ARENA_FLAG_NO_ZERO);
+
+        fread(data.data, data.count, 1, handle);
+        fclose(handle);
+
+        AMTS_Skeleton amts = { 0 };
+        AMTS_SkeletonFromData(&amts, data);
+
+        if (amts.version == AMTS_VERSION) {
+            // we have a version we recognise
+            //
+            skeleton->string_table.count = amts.string_table.count;
+            skeleton->string_table.data  = ArenaPushCopy(arena, amts.string_table.data, U8, skeleton->string_table.count);
+
+            skeleton->framerate = amts.framerate;
+
+            // @todo: this doesn't need to be a U8 anymore
+            //
+            skeleton->num_bones      = cast(U8) amts.num_bones;
+            skeleton->num_animations = amts.num_tracks;
+
+            skeleton->bones = ArenaPush(arena, A_Bone, skeleton->num_bones);
+
+            for (U32 it = 0; it < skeleton->num_bones; ++it) {
+                AMTS_BoneInfo *src = &amts.bones[it];
+                A_Bone *dst = &skeleton->bones[it];
+
+                dst->parent_index = src->parent_index;
+
+                dst->name.count = src->name_count;
+                dst->name.data  = &skeleton->string_table.data[src->name_offset];
+
+                memcpy(dst->inv_bind_pose.e, src->inv_bind_pose, 16 * sizeof(F32));
+                memcpy(&dst->bind_pose_orientation, src->bind_orientation, sizeof(Quat4F));
+            }
+
+            // @todo: clean this up, the A_Sample and AMTS_Sample are basically the same thing
+            //
+            skeleton->animations = ArenaPush(arena, A_Animation3, skeleton->num_animations);
+
+            Assert(sizeof(AMTS_Sample) == sizeof(A_Sample));
+
+            A_Sample *samples = ArenaPushCopy(arena, amts.samples, A_Sample, amts.total_samples);
+
+            for (U32 it = 0; it < skeleton->num_animations; ++it) {
+                AMTS_TrackInfo *track     = &amts.tracks[it];
+                A_Animation3   *animation = &skeleton->animations[it];
+
+                animation->name.count = track->name_count;
+                animation->name.data  = &skeleton->string_table.data[track->name_offset];
+
+                animation->time       = 0;
+                animation->time_scale = 1;
+
+                // @todo: remove A_Frame type, we can just offset directly into the array without the
+                // need for this!! extra allocation overhead etc.
+                //
+                animation->num_frames = track->num_frames;
+                animation->frames     = ArenaPush(arena, A_Frame, animation->num_frames);
+
+                for (U32 f = 0; f < animation->num_frames; ++f) {
+                    A_Frame *frame = &animation->frames[f];
+
+                    frame->samples = samples;
+                    samples += skeleton->num_bones;
+                }
+            }
+        }
+
+        result = true;
+    }
+
+    TempRelease(&temp);
+
+    return result;
+}
+
+#if 0
 static B32 SkeletonFileLoad(A_Skeleton *skeleton, const char *path) {
     B32 result = false;
 
@@ -531,6 +589,7 @@ static B32 SkeletonFileLoad(A_Skeleton *skeleton, const char *path) {
 
     return result;
 }
+#endif
 #endif
 
 static Str8 FileReadAll(const char *path) {
@@ -731,6 +790,10 @@ int main(int argc, char **argv) {
     const char *skel_path = "../test/other.amts";
 #endif
 
+    // reserve a 64 gib arena
+    //
+    Arena *arena = ArenaAlloc(GB(64));
+
     A_Mesh mesh = {};
     if (!MeshFileLoad(&mesh, mesh_path)) {
         printf("[error] :: failed to load mesh\n");
@@ -742,9 +805,15 @@ int main(int argc, char **argv) {
     printf("   - %d vertices\n", mesh.num_vertices);
 
     A_Skeleton skeleton = {};
-    if (!SkeletonFileLoad(&skeleton, skel_path)) {
-        printf("[error] :: failed to load skeleton\n");
-        return 1;
+    {
+        Str8 path;
+        path.count = strlen(skel_path);
+        path.data  = cast(U8 *) skel_path;
+
+        if (!SkeletonFileLoad(arena, &skeleton, path)) {
+            printf("[error] :: failed to load skeleton\n");
+            return 1;
+        }
     }
 
     printf("Skeleton info:\n");
@@ -1046,9 +1115,6 @@ int main(int argc, char **argv) {
     B32 running = true;
 
     // camera @todo: make this a parameterized structure
-    Vec3F x = { 1, 0, 0 };
-    Vec3F y = { 0, 1, 0 };
-    Vec3F z = { 0, 0, 1 };
     Vec3F p = { 0, 8, 0 };
 
     B32 w = false, s = false, a = false, d = false;
@@ -1169,9 +1235,11 @@ int main(int argc, char **argv) {
 
         Mat4x4F rot = M4x4FMul(yrot, prot);
 
-        x = M4x4FColumnExtract(rot, 0);
-        y = M4x4FColumnExtract(rot, 1);
-        z = M4x4FColumnExtract(rot, 2);
+        // the local axes of the camera transform
+        //
+        Vec3F x = M4x4FColumnExtract(rot, 0);
+        Vec3F y = M4x4FColumnExtract(rot, 1);
+        Vec3F z = M4x4FColumnExtract(rot, 2);
 
 #define MOVE_SPEED 4.7f
 
@@ -1441,7 +1509,7 @@ int main(int argc, char **argv) {
 
         // transition image to present src optimal
         //
-        // @todo: gather both of these transitions into a single dependency info
+        // @todo: gather both of these transitions into a single dependency info, we can issue them together
         //
         image_barrier.srcStageMask  = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
         image_barrier.dstStageMask  = VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT;
@@ -1515,6 +1583,7 @@ int main(int argc, char **argv) {
 
         U64 end = U64TicksGet();
         delta_time = (F32) F64ElapsedTimeGet(start, end);
+        delta_time = Clamp(0, delta_time, 0.2f);
 
         total_time += delta_time;
 
@@ -1523,3 +1592,5 @@ int main(int argc, char **argv) {
 
     return 0;
 }
+
+#include "file_formats.c"

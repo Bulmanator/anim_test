@@ -219,7 +219,7 @@ static B32 VK_ContextInitialise(VK_Context *vk) {
         return 1;
     }
 
-    #define VK_DYN_FUNCTION(x) vk->x = (PFN_vk##x) vk->GetInstanceProcAddr(0, STRINGIFY(vk##x))
+    #define VK_DYN_FUNCTION(x) vk->x = (PFN_vk##x) vk->GetInstanceProcAddr(0, Stringify(vk##x))
         #define VK_GLOBAL_FUNCTIONS
         #include "vulkan_dyn_functions.cpp"
     #undef VK_DYN_FUNCTION
@@ -269,7 +269,7 @@ static B32 VK_ContextInitialise(VK_Context *vk) {
 
         VK_CHECK(vk->CreateInstance(&create_info, 0, &vk->instance));
 
-        #define VK_DYN_FUNCTION(x) vk->x = (PFN_vk##x) vk->GetInstanceProcAddr(vk->instance, STRINGIFY(vk##x))
+        #define VK_DYN_FUNCTION(x) vk->x = (PFN_vk##x) vk->GetInstanceProcAddr(vk->instance, Stringify(vk##x))
             #define VK_DEBUG_FUNCTIONS
             #define VK_INSTANCE_FUNCTIONS
             #include "vulkan_dyn_functions.cpp"
@@ -427,7 +427,7 @@ static B32 VK_ContextInitialise(VK_Context *vk) {
 
         VK_CHECK(vk->CreateDevice(device->physical, &create_info, 0, &device->handle));
 
-        #define VK_DYN_FUNCTION(x) vk->x = (PFN_vk##x) vk->GetDeviceProcAddr(vk->device->handle, STRINGIFY(vk##x))
+        #define VK_DYN_FUNCTION(x) vk->x = (PFN_vk##x) vk->GetDeviceProcAddr(vk->device->handle, Stringify(vk##x))
             #define VK_DEVICE_FUNCTIONS
             #include "vulkan_dyn_functions.cpp"
         #undef VK_DYN_FUNCTION
@@ -714,12 +714,12 @@ static B32 VK_SwapchainCreate(VK_Device *device, VK_Swapchain *swapchain) {
 
     assert(surface_caps.minImageCount <= VK_MAX_IMAGE_COUNT);
 
-    swapchain->images.count = MAX(VK_IMAGE_COUNT, surface_caps.minImageCount);
+    swapchain->images.count = Max(VK_IMAGE_COUNT, surface_caps.minImageCount);
 
     if (surface_caps.maxImageCount != 0) {
         // there is an actual limit on the maximum number of images that can be on a swapchain
         //
-        swapchain->images.count = MIN(swapchain->images.count, surface_caps.maxImageCount);
+        swapchain->images.count = Min(swapchain->images.count, surface_caps.maxImageCount);
     }
 
     VkSwapchainKHR old = swapchain->handle;
