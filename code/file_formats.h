@@ -140,4 +140,10 @@ struct AMTS_Skeleton {
 Function void AMTS_SkeletonFromData(AMTS_Skeleton *skeleton, Str8 data);
 Function void AMTS_SkeletonCopyFromData(Arena *arena, AMTS_Skeleton *skeleton, Str8 data);
 
+// Mesh (AMTM) file format
+//
+// [ Header ]
+//
+// @incomplete: needs more thought
+
 #endif  // FILE_FORMATS_H_

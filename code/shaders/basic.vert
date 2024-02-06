@@ -1,18 +1,20 @@
 #version 460 core
 
 #extension GL_EXT_shader_8bit_storage : require
+#extension GL_EXT_shader_16bit_storage : require
 #extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
 #extension GL_EXT_scalar_block_layout : require
 
 struct Vertex {
-    float x, y, z;
-    float u, v;
-    float nx, ny, nz;
-
-    uint8_t indices[4];
-    float w[3];
+    vec3 position;
+    uint16_t u, v; // should really be float16_t
+    uint8_t nx, ny, nz, nw;
 
     uint material_index;
+
+    uint8_t indices[4];
+    uint8_t weights[4];
 };
 
 layout(push_constant, scalar, row_major)
@@ -29,8 +31,7 @@ uniform R_Setup {
     float unused[9];
 } setup;
 
-// @todo: make these scalar layout for easier transfer!!
-layout(binding = 0, std430)
+layout(binding = 0, scalar)
 buffer Vertices {
     Vertex vertices[];
 };
@@ -48,21 +49,17 @@ layout(location = 3) flat out uint material_index;
 void main() {
     Vertex vertex = vertices[gl_VertexIndex];
 
-    vec3 local_position = vec3(vertex.x, vertex.y, vertex.z);
+    vec3 local_position = vertex.position;
     vec4 position = vec4(0, 0, 0, 0);
 
-    for (int it = 0; it < 3; ++it) {
-        position += vertex.w[it] * (bones[vertex.indices[it]] * vec4(local_position, 1.0));
+    for (int it = 0; it < 4; ++it) {
+        position += (vertex.weights[it] / 255.0) * (bones[vertex.indices[it]] * vec4(local_position, 1.0));
     }
-
-    // I don't think this is worth it, just store the 4th weight in the vertex
-    float w4 = 1 - vertex.w[0] - vertex.w[1] - vertex.w[2];
-    position += (w4 * (bones[vertex.indices[3]] * vec4(local_position, 1.0)));
 
     gl_Position = setup.view_proj * vec4(position.xyz, 1.0);
 
-    frag_uv        = vec2(vertex.u,  vertex.v);
-    frag_normal    = vec3(vertex.nx, vertex.ny, vertex.nz);
+    frag_uv        = vec2(vertex.u,  vertex.v) / 65535.0;
+    frag_normal    = (vec3(vertex.nx, vertex.ny, vertex.nz) / 127.0) - 1.0;
     frag_pos       = position.xyz;
     material_index = vertex.material_index;
 }

@@ -37,24 +37,39 @@ static void *zmalloc(size_t size) {
 // Mesh file
 //
 
+// 24 bytes
+//
 struct Vertex3 {
-    F32 position[3];
-    F32 uv[2];
-    F32 normal[3];
+    Vec3F position;
+    U16   uv[2];
+    U8    normal[4];
 
+    // this doesn't really need to be a U32 but the struct will likely be
+    // padded anyway because 22 bytes is a weird size (i.e. for a U16)
+    //
     U32 material_index;
 };
 
+// 32 bytes
+//
+// U8 bone weights seem fine at the moment, however, the test mesh is a robot which is designed to be
+// rigid so probably want to test on something which would have more compression etc.
+//
 struct SkinnedVertex3 {
-    F32 position[3];
-    F32 uv[2];
-    F32 normal[3];
+    union {
+        struct {
+            Vec3F position;
+            U16   uv[2];
+            U8    normal[4];
 
-    U8  bone_indices[4];
-    F32 bone_weights[3];
+            U32 material_index;
+        };
 
-    // @todo: where should this go, also can easily be a U16
-    U32 material_index;
+        Vertex3 vertex;
+    };
+
+    U8 bone_indices[4];
+    U8 bone_weights[4];
 };
 
 struct A_Material {
@@ -76,7 +91,7 @@ struct A_Material {
 };
 
 struct A_Mesh {
-    B8 has_bones;
+    B32 has_bones;
 
     Str8 string_table;
 
@@ -123,6 +138,243 @@ static B32 MeshFileLoad(A_Mesh *mesh, const char *path) {
     return result;
 }
 #else
+
+#pragma pack(push, 1)
+
+// @todo: this is very incomplete, need to think more seriously about the layout of the mesh file!
+//
+
+#define AMTM_MAGIC   FourCC('A', 'M', 'T', 'M')
+#define AMTM_VERSION 1
+
+struct AMTM_Header {
+    U32 magic;
+    U32 version;
+
+    U32 flags;
+
+    U32 num_meshes;
+    U32 num_vertices;
+    U32 num_indices;
+
+    U32 num_materials;
+    U32 num_textures;
+
+    U32 string_table_count;
+
+    U32 pad[7];
+};
+
+StaticAssert(sizeof(AMTM_Header) == 64);
+
+struct AMTM_Vertex {
+    F32 position[3];
+    F32 uv[2];
+    F32 normal[3];
+
+    U32 material_index;
+};
+
+struct AMTM_SkinnedVertex {
+    union {
+        struct {
+            F32 position[3];
+            F32 uv[2];
+            F32 normal[3];
+
+            U32 material_index;
+        };
+
+        AMTM_Vertex vertex;
+    };
+
+    U8  bone_indices[4];
+    F32 bone_weights[4];
+};
+
+struct AMTM_Material {
+    Vec4F colour;
+
+    F32 roughness;
+    F32 metallic;
+    F32 ior;
+
+    F32 anisotropic;
+    F32 anisotropic_rotation;
+
+    F32 clear_coat;
+    F32 clear_coat_roughness;
+
+    F32 sheen;
+    F32 sheen_roughness;
+
+    U16 name_count;
+    U16 name_offset;
+};
+
+#pragma pack(pop, 1)
+
+#if 1
+Function B32 MeshFileLoad(Arena *arena, A_Mesh *mesh, Str8 path) {
+    B32 result = false;
+
+    TempArena temp = TempGet(0, 0);
+    char *zpath    = ArenaPush(temp.arena, char, path.count + 1);
+
+    memcpy(zpath, path.data, path.count);
+
+    FILE *handle = fopen(zpath, "rb");
+    if (handle) {
+        Str8 data;
+
+        fseek(handle, 0, SEEK_END);
+        data.count = ftell(handle);
+        fseek(handle, 0, SEEK_SET);
+
+        data.data = ArenaPush(temp.arena, U8, data.count);
+
+        fread(data.data, data.count, 1, handle);
+        fclose(handle);
+
+        AMTM_Header *header = cast(AMTM_Header *) data.data;
+
+        if (header->magic != AMTM_MAGIC) {
+            printf("[ERR] :: Not a AMTM file\n");
+            return result;
+        }
+
+        if (header->version != AMTM_VERSION) {
+            printf("[ERR] :: Unknown AMTM file version\n");
+            return result;
+        }
+
+        // @incomplete: rough file layout for mesh
+        //
+        // Header
+        // String Table
+        // Mesh
+        // Materials
+        // Vertices
+        // Indices
+        //
+
+        // Setup the string table
+        //
+        Str8 string_table;
+        string_table.count = header->string_table_count;
+        string_table.data  = cast(U8 *) (header + 1);
+
+        mesh->string_table.count = string_table.count;
+        mesh->string_table.data  = ArenaPushCopy(arena, string_table.data, U8, string_table.count);
+
+        // @incomplete: load dummy mesh, as we don't split on export there is only one and its kinda
+        // useless to us
+        //
+        // so skip past it for now
+        //
+        U64 mesh_offset = 12;
+
+        // Load material info
+        //
+        mesh->num_materials = header->num_materials;
+        mesh->materials     = ArenaPush(arena, A_Material, mesh->num_materials);
+
+        AMTM_Material *material = cast(AMTM_Material *) (string_table.data + string_table.count + mesh_offset);
+        for (U32 it = 0; it < mesh->num_materials; ++it) {
+            A_Material *dst = &mesh->materials[it];
+
+            dst->base_colour = material->colour;
+
+            dst->roughness = material->roughness;
+            dst->metallic  = material->metallic;
+            dst->ior       = material->ior;
+
+            dst->anisotropic          = material->anisotropic;
+            dst->anisotropic_rotation = material->anisotropic_rotation;
+
+            dst->clear_coat           = material->clear_coat;
+            dst->clear_coat_roughness = material->clear_coat_roughness;
+
+            dst->sheen           = material->sheen;
+            dst->sheen_roughness = material->sheen_roughness;
+
+            dst->name.count = material->name_count;
+            dst->name.data  = &mesh->string_table.data[material->name_offset];
+
+            material++;
+        }
+
+        // Load vertex and index data
+        //
+        mesh->num_vertices = header->num_vertices;
+        mesh->num_indices  = header->num_indices;
+
+        mesh->has_bones = (header->flags & 0x1) != 0;
+
+        U16 *indices = 0;
+
+        if (mesh->has_bones) {
+            mesh->skinned_vertices = ArenaPush(arena, SkinnedVertex3, mesh->num_vertices);
+
+            // material has now iterated over all of the material info so now points to the beginning
+            // of the vertex array
+            //
+            AMTM_SkinnedVertex *vertices = cast(AMTM_SkinnedVertex *) material;
+
+            for (U32 it = 0; it < mesh->num_vertices; ++it) {
+                AMTM_SkinnedVertex *src = &vertices[it];
+                SkinnedVertex3     *dst = &mesh->skinned_vertices[it];
+
+                dst->position.x = src->position[0];
+                dst->position.y = src->position[1];
+                dst->position.z = src->position[2];
+
+                dst->uv[0] = cast(U16) (src->uv[0] * U16_MAX);
+                dst->uv[1] = cast(U16) (src->uv[1] * U16_MAX);
+
+                dst->normal[0] = cast(U8) ((src->normal[0] * 127.0f) + 127.5f);
+                dst->normal[1] = cast(U8) ((src->normal[1] * 127.0f) + 127.5f);
+                dst->normal[2] = cast(U8) ((src->normal[2] * 127.0f) + 127.5f);
+                dst->normal[3] = 255;
+
+                dst->material_index = src->material_index;
+
+                dst->bone_indices[0] = src->bone_indices[0];
+                dst->bone_indices[1] = src->bone_indices[1];
+                dst->bone_indices[2] = src->bone_indices[2];
+                dst->bone_indices[3] = src->bone_indices[3];
+
+                dst->bone_weights[0] = cast(U8) (src->bone_weights[0] * U8_MAX);
+                dst->bone_weights[1] = cast(U8) (src->bone_weights[1] * U8_MAX);
+                dst->bone_weights[2] = cast(U8) (src->bone_weights[2] * U8_MAX);
+                dst->bone_weights[3] = cast(U8) (src->bone_weights[3] * U8_MAX);
+
+                // doubt this is gonna work
+                U32 sum = dst->bone_weights[0] + dst->bone_weights[1] + dst->bone_weights[2] + dst->bone_weights[3];
+                Assert(sum <= 255);
+            }
+
+            indices = cast(U16 *) (vertices + mesh->num_vertices);
+        }
+        else {
+            mesh->vertices = ArenaPush(arena, Vertex3, mesh->num_vertices);
+            Assert(!"INCOMPLETE MUST BE SKINNED MESH");
+        }
+
+        Assert(indices != 0);
+
+        mesh->indices = ArenaPushCopy(arena, indices, U16, mesh->num_indices);
+
+        // @incomplete: not loading textures either!!!!
+        //
+
+        result = true;
+    }
+
+    return result;
+}
+#else
+
 static B32 MeshFileLoad(A_Mesh *mesh, const char *path) {
     B32 result = false;
 
@@ -172,8 +424,6 @@ static B32 MeshFileLoad(A_Mesh *mesh, const char *path) {
             return result;
         }
 
-        printf("Current position %ld\n", ftell(f));
-
         mesh->string_table.count = string_table_count;
         mesh->string_table.data  = (U8 *) malloc(string_table_count);
 
@@ -203,8 +453,8 @@ static B32 MeshFileLoad(A_Mesh *mesh, const char *path) {
             fread(&material->roughness,            sizeof(F32),   1, f);
             fread(&material->metallic,             sizeof(F32),   1, f);
             fread(&material->ior,                  sizeof(F32),   1, f);
-            // fread(&material->anisotropic,          sizeof(F32),   1, f);
-            // fread(&material->anisotropic_rotation, sizeof(F32),   1, f);
+            fread(&material->anisotropic,          sizeof(F32),   1, f);
+            fread(&material->anisotropic_rotation, sizeof(F32),   1, f);
             fread(&material->clear_coat,           sizeof(F32),   1, f);
             fread(&material->clear_coat_roughness, sizeof(F32),   1, f);
             fread(&material->sheen,                sizeof(F32),   1, f);
@@ -259,6 +509,7 @@ static B32 MeshFileLoad(A_Mesh *mesh, const char *path) {
 
     return result;
 }
+#endif
 #endif
 
 static B32 SkeletonFileLoad(Arena *arena, A_Skeleton *skeleton, Str8 path) {
@@ -438,14 +689,20 @@ int main(int argc, char **argv) {
     Arena *arena = ArenaAlloc(GB(64));
 
     A_Mesh mesh = {};
-    if (!MeshFileLoad(&mesh, mesh_path)) {
-        printf("[error] :: failed to load mesh\n");
-        return 1;
-    }
+    {
+        Str8 path;
+        path.count = strlen(mesh_path);
+        path.data  = cast(U8 *) mesh_path;
 
-    printf("Mesh info:\n");
-    printf("   - %d indices\n",  mesh.num_indices);
-    printf("   - %d vertices\n", mesh.num_vertices);
+        if (!MeshFileLoad(arena, &mesh, path)) {
+            printf("[error] :: failed to load mesh\n");
+            return 1;
+        }
+
+        printf("Mesh info:\n");
+        printf("   - %d indices\n",  mesh.num_indices);
+        printf("   - %d vertices\n", mesh.num_vertices);
+    }
 
     A_Skeleton skeleton = {};
     {

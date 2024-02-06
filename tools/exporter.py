@@ -291,6 +291,9 @@ def R_MaterialsWrite(file_handle, materials):
         F32Write(file_handle, material.properties["Metallic"][0])
         F32Write(file_handle, material.properties["IOR"][0])
 
+        F32Write(file_handle, material.properties["Anisotropic"][0])
+        F32Write(file_handle, material.properties["Anisotropic Rotation"][0])
+
         F32Write(file_handle, material.properties["Coat Weight"][0])
         F32Write(file_handle, material.properties["Coat Roughness"][0])
 
@@ -313,17 +316,13 @@ def R_MeshVerticesWrite(file_handle, vertices, has_skeleton):
         F32Write(file_handle, v.normal.y)
         F32Write(file_handle, v.normal.z)
 
+        U32Write(file_handle, v.material_index)
+
         if has_skeleton:
             weights = R_MeshJointWeightsNormalise(v.joint_weights)
-            for i in v.joint_indices:
-                U8Write(file_handle, i)
 
-            # Only write the first 3 weights, the 4th can be calculated
-            F32Write(file_handle, weights[0])
-            F32Write(file_handle, weights[1])
-            F32Write(file_handle, weights[2])
-
-        U32Write(file_handle, v.material_index)
+            for i in v.joint_indices:  U8Write(file_handle, i)
+            for w in weights:         F32Write(file_handle, w)
 
 
 def DumpMaterials(materials):
@@ -628,7 +627,7 @@ class AmtExporter(bpy.types.Operator):
     bl_label  = "Export"
 
     def execute(self, context):
-        return A_SkeletonExport()
+        return R_MeshExport()
 
 
 class ExportPanel(bpy.types.Panel):
