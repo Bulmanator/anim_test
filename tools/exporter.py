@@ -537,20 +537,33 @@ def R_MeshExport():
                 if bpy.context.scene.export_properties.flip_uv_y:
                     uv.y = 1 - uv.y
 
-                joint_indices = [0, 0, 0, 0]
-                joint_weights = [0, 0, 0, 0]
+                bone_indices = [0, 0, 0, 0]
+                bone_weights = [0, 0, 0, 0]
 
+                # This checks that the vertex group which the vertex is apart of actually exists within
+                # the armature. This may not always be the case due to blender deciding that it would be
+                # a good idea to use vertex groups for armature deform modification as well as use defined
+                # selection groups
+                #
                 if armature:
-                    for it, group in enumerate(mesh.vertices[loop.vertex_index].groups):
-                        if it < 4:
+                    bone_count = 0
+                    for group in mesh.vertices[loop.vertex_index].groups:
+                        if bone_count < 4:
                             group_index = group.group
                             bone_name   = base_object.vertex_groups[group_index].name
+                            bone_index  = armature.data.bones.find(bone_name)
 
-                            joint_indices[it] = armature.data.bones.find(bone_name)
-                            joint_weights[it] = group.weight
+                            if bone_index >= 0:
+                                bone_indices[bone_count] = bone_index
+                                bone_weights[bone_count] = group.weight
 
-                # :note joint weights are normalised at a later time
-                vertex = R_Vertex(position, uv, normal, material_index, joint_indices, joint_weights)
+                                bone_count += 1
+                        else:
+                            # We only support skinning influences from up to 4 bones
+                            break
+
+                # :note bone weights are normalised at a later time
+                vertex = R_Vertex(position, uv, normal, material_index, bone_indices, bone_weights)
                 if not vertex in vertices:
                    vertices[vertex] = len(vertices)
 
@@ -627,7 +640,8 @@ class AmtExporter(bpy.types.Operator):
     bl_label  = "Export"
 
     def execute(self, context):
-        return R_MeshExport()
+        R_MeshExport()
+        return A_SkeletonExport()
 
 
 class ExportPanel(bpy.types.Panel):

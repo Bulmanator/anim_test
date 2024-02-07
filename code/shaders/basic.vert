@@ -52,9 +52,13 @@ void main() {
     vec3 local_position = vertex.position;
     vec4 position = vec4(0, 0, 0, 0);
 
+#if 1
     for (int it = 0; it < 4; ++it) {
         position += (vertex.weights[it] / 255.0) * (bones[vertex.indices[it]] * vec4(local_position, 1.0));
     }
+#else
+    position = vec4(local_position, 1.0);
+#endif
 
     gl_Position = setup.view_proj * vec4(position.xyz, 1.0);
 

@@ -98,7 +98,7 @@ struct A_Mesh {
     U32 num_vertices;
 
     U32 num_indices;
-    U16 *indices; // 3 * num_faces in length
+    U16 *indices;
 
     union {
         Vertex3 *vertices;
@@ -335,7 +335,7 @@ Function B32 MeshFileLoad(Arena *arena, A_Mesh *mesh, Str8 path) {
                 dst->normal[0] = cast(U8) ((src->normal[0] * 127.0f) + 127.5f);
                 dst->normal[1] = cast(U8) ((src->normal[1] * 127.0f) + 127.5f);
                 dst->normal[2] = cast(U8) ((src->normal[2] * 127.0f) + 127.5f);
-                dst->normal[3] = 255;
+                dst->normal[3] = 254; // 1.0 unused in shader, here for padding
 
                 dst->material_index = src->material_index;
 
@@ -663,11 +663,29 @@ int WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int n
     (void) hPrevInstance;
     (void) lpCmdLine;
     (void) nCmdShow;
+
+    {
+        if (!AttachConsole(ATTACH_PARENT_PROCESS)) {
+            Assert(AllocConsole() == TRUE);
+        }
+
+        HANDLE std_handle = CreateFileW(L"CONOUT$", GENERIC_READ | GENERIC_WRITE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE, 0, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0);
+
+        Assert(std_handle != INVALID_HANDLE_VALUE);
+
+        SetStdHandle(STD_OUTPUT_HANDLE, std_handle);
+        SetStdHandle(STD_ERROR_HANDLE,  std_handle);
+
+        freopen("CON", "w", stdout);
+        freopen("CON", "w", stderr);
+    }
 #elif OS_LINUX
 int main(int argc, char **argv) {
     (void) argv;
     (void) argc;
 #endif
+
 
 #if 0
     if (argc < 3) {
@@ -680,8 +698,8 @@ int main(int argc, char **argv) {
     //const char *mesh_path = "../test/mesh/ninja_female_01.mesh";
     //const char *skel_path = "../test/skeleton/ninja_female_01.anim";
 
-    const char *mesh_path = "../test/George.amtm";
-    const char *skel_path = "../test/George.amts";
+    const char *mesh_path = "../test/Characters_Mako.amtm";
+    const char *skel_path = "../test/Characters_Mako.amts";
 #endif
 
     // reserve a 64 gib arena
@@ -895,7 +913,7 @@ int main(int argc, char **argv) {
         rs.polygonMode = VK_POLYGON_MODE_FILL;
         rs.frontFace   = VK_FRONT_FACE_CLOCKWISE;
         rs.cullMode    = VK_CULL_MODE_BACK_BIT;
-        rs.lineWidth   = 1.8f;
+        rs.lineWidth   = 1.35f;
 
         VkPipelineMultisampleStateCreateInfo ms = {};
         ms.sType                = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
