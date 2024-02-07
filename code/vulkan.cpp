@@ -1,177 +1,3 @@
-#if OS_WINDOWS
-    #define VK_USE_PLATFORM_WIN32_KHR   1
-#elif OS_LINUX
-    #define VK_USE_PLATFORM_WAYLAND_KHR 1
-#endif
-
-#define VK_NO_PROTOTYPES 1
-#include <vulkan/vulkan.h>
-
-#include <time.h>
-
-#define VK_CHECK(x) assert((x) == VK_SUCCESS)
-
-#define VK_FRAME_COUNT     2 // number of processing frames in flight
-
-#define VK_IMAGE_COUNT     3 // number of images on the swapchain (triple buffer)
-#define VK_MAX_IMAGE_COUNT 8 // maximum number of images a swapchain can have
-
-struct VK_Context;
-struct VK_Device;
-
-typedef U32 VK_ContextFlags;
-enum {
-    VK_CONTEXT_FLAG_DEBUG = (1 << 0),
-};
-
-struct VK_Queue {
-    U32 family;
-    VkQueue handle;
-};
-
-#define VK_COMMAND_BUFFER_SET_COUNT 8
-
-struct VK_CommandBufferSet {
-    U32 next_buffer;
-    VkCommandBuffer handles[VK_COMMAND_BUFFER_SET_COUNT];
-
-    VK_CommandBufferSet *next;
-};
-
-struct VK_Frame {
-    VkCommandPool command_pool;
-
-    VK_CommandBufferSet cmds_first; // head reset to on pool reset
-    VK_CommandBufferSet *cmds;      // place to allocate next command buffer from
-
-    VkDescriptorPool descriptor_pool;
-
-    VkSemaphore acquire; // signalled when swapchain image has been acquired, wait on before rendering
-    VkSemaphore render;  // signalled when rendering has complete, wait on before presenting
-
-    VkFence fence;
-
-    U32 image_index; // index into the swapchain images array
-
-    VK_Frame *next;
-};
-
-struct VK_Device {
-    VkDevice handle;
-    VkPhysicalDevice physical;
-
-    VkPhysicalDeviceProperties       properties;
-    VkPhysicalDeviceFeatures         features;
-    VkPhysicalDeviceMemoryProperties memory_properties;
-
-    // assumes present is also available on the same queue, this is the case
-    // across the board for all gpu vendors
-    //
-    VK_Queue graphics_queue;
-
-    VkCommandPool scratch_cmd_pool; // for quick commands that only need to be submitted once
-
-    VK_Frame frames[VK_FRAME_COUNT];
-    VK_Frame *frame;
-
-    VK_Context *vk;
-    VK_Device  *next;
-};
-
-struct VK_Context {
-#if OS_WINDOWS
-    HMODULE lib;
-#elif OS_LINUX
-    void *lib;
-#endif
-
-    PFN_vkGetInstanceProcAddr GetInstanceProcAddr;
-
-    VK_ContextFlags flags;
-
-    VkInstance instance;
-    VkDebugUtilsMessengerEXT debug_messenger;
-
-    VK_Device *devices; // list of all available devices
-    VK_Device *device;  // selected device, is initialised for use
-
-    #define VK_DYN_FUNCTION(x) PFN_vk##x x
-        #define VK_GLOBAL_FUNCTIONS
-        #define VK_DEBUG_FUNCTIONS
-        #define VK_INSTANCE_FUNCTIONS
-        #define VK_DEVICE_FUNCTIONS
-        #include "vulkan_dyn_functions.cpp"
-    #undef VK_DYN_FUNCTION
-};
-
-struct VK_Swapchain {
-    struct {
-        VkSurfaceKHR handle;
-        VkSurfaceFormatKHR format;
-
-        union {
-#if OS_WINDOWS
-            struct {
-                HINSTANCE hinstance;
-                HWND hwnd;
-            } win;
-#elif OS_LINUX
-            struct {
-                struct wl_display *display;
-                struct wl_surface *surface;
-            } wl;
-#endif
-        };
-
-        U32 width;
-        U32 height;
-    } surface;
-
-    VkSwapchainKHR handle;
-
-    // :note this is a supported present mode allowing vsync to be disabled, FIFO is vsync enabled and
-    // is mandated by spec to be supported. if there are no other present modes available then this will
-    // just be set to FIFO and will have no effect
-    //
-    VkPresentModeKHR vsync_disable;
-    B32 vsync; // whether vsync is on or off
-
-    struct {
-        U32 count;
-        VkImage handles[VK_MAX_IMAGE_COUNT];
-        VkImageView views[VK_MAX_IMAGE_COUNT];
-    } images;
-
-    struct {
-        VkDeviceMemory memory;
-
-        VkImage     image;
-        VkImageView view;
-    } depth;
-};
-
-struct VK_Pipeline {
-    VkPipeline handle;
-
-    VkShaderModule vs;
-    VkShaderModule fs;
-
-    VkDescriptorSetLayout set_layout;
-    VkPipelineLayout layout;
-};
-
-struct VK_Buffer {
-    VkBuffer handle;
-    VkDeviceMemory memory;
-
-    B32 host_mapped;
-    VkBufferUsageFlags usage;
-
-    U64   offset;
-    U64   size;
-    U64   alignment;
-    void *data;
-};
 
 static B32 VK_LibraryLoad(VK_Context *vk) {
     B32 result;
@@ -963,4 +789,152 @@ static void VK_BufferCreate(VK_Device *device, VK_Buffer *buffer) {
     VK_CHECK(vk->BindBufferMemory(device->handle, buffer->handle, buffer->memory, 0));
 
     if (buffer->host_mapped) { vk->MapMemory(device->handle, buffer->memory, 0, buffer->size, 0, &buffer->data); }
+}
+
+Function VkShaderModule VK_ShaderModuleCreate(VK_Device *device, Str8 code) {
+    VkShaderModule result = VK_NULL_HANDLE;
+
+    VK_Context *vk = device->vk;
+
+    VkShaderModuleCreateInfo create_info = {};
+    create_info.sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    create_info.codeSize = code.count;
+    create_info.pCode    = cast(U32 *) code.data;
+
+    VK_CHECK(vk->CreateShaderModule(device->handle, &create_info, 0, &result));
+
+    return result;
+}
+
+Function void VK_PipelineCreate(VK_Device *device, VK_Pipeline *pipeline) {
+    VK_Context *vk = device->vk;
+
+    VkDescriptorSetLayoutBinding bindings[8] = { 0 };
+
+    for (U32 it = 0; it < pipeline->num_descriptors; ++it) {
+        VK_DescriptorInfo *info = &pipeline->descriptors[it];
+        VkDescriptorSetLayoutBinding *binding = &bindings[it];
+
+        binding->binding         = it;
+        binding->descriptorType  = info->type;
+        binding->descriptorCount = 1;
+        binding->stageFlags      = info->stages;
+    }
+
+    {
+        VkDescriptorSetLayoutCreateInfo create_info = { 0 };
+        create_info.sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        create_info.bindingCount = pipeline->num_descriptors;
+        create_info.pBindings    = bindings;
+
+        VK_CHECK(vk->CreateDescriptorSetLayout(device->handle, &create_info, 0, &pipeline->layout.set));
+    }
+
+    {
+        VkPushConstantRange range = { 0 };
+        range.stageFlags = pipeline->push_stages;
+        range.offset     = 0;
+        range.size       = cast(U32) pipeline->push_size;
+
+        VkPipelineLayoutCreateInfo create_info = { 0 };
+        create_info.sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        create_info.setLayoutCount         = 1;
+        create_info.pSetLayouts            = &pipeline->layout.set;
+        create_info.pushConstantRangeCount = 1;
+        create_info.pPushConstantRanges    = &range;
+
+        VK_CHECK(vk->CreatePipelineLayout(device->handle, &create_info, 0, &pipeline->layout.pipeline));
+    }
+
+    // Create the pipeline
+    //
+    {
+        VK_PipelineState *state = &pipeline->state;
+
+        VkPipelineShaderStageCreateInfo stages[3] = {};
+
+        for (U32 it = 0; it < pipeline->num_shaders; ++it) {
+            VkPipelineShaderStageCreateInfo *stage = &stages[it];
+
+            stage->sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+            stage->stage  = (it == 0) ? VK_SHADER_STAGE_VERTEX_BIT : VK_SHADER_STAGE_FRAGMENT_BIT; // insane you have to pass this
+            stage->module = pipeline->shaders[it];
+            stage->pName  = "main";
+        }
+
+        VkPipelineVertexInputStateCreateInfo   vi = { VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
+        VkPipelineInputAssemblyStateCreateInfo ia = { VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO };
+        VkPipelineViewportStateCreateInfo      vp = { VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO };
+        VkPipelineRasterizationStateCreateInfo rs = { VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO };
+        VkPipelineMultisampleStateCreateInfo   ms = { VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO };
+        VkPipelineDepthStencilStateCreateInfo  ds = { VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO };
+        VkPipelineColorBlendStateCreateInfo    om = { VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO };
+
+        ia.topology = state->topology;
+
+        vp.viewportCount = 1;
+        vp.scissorCount  = 1;
+
+        rs.polygonMode = state->polygon_mode;
+        rs.frontFace   = state->front_face;
+        rs.cullMode    = state->cull_mode;
+        rs.lineWidth   = 1.0f;
+
+        ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+        ds.depthTestEnable  = state->depth_test;
+        ds.depthWriteEnable = state->depth_write;
+        ds.depthCompareOp   = state->depth_compare_op;
+
+        // No multi-blend for now
+        //
+        VkPipelineColorBlendAttachmentState blend_attachment = {};
+
+        VkColorComponentFlags all_components;
+
+        all_components |= VK_COLOR_COMPONENT_R_BIT;
+        all_components |= VK_COLOR_COMPONENT_G_BIT;
+        all_components |= VK_COLOR_COMPONENT_B_BIT;
+        all_components |= VK_COLOR_COMPONENT_A_BIT;
+
+        blend_attachment.blendEnable    = VK_FALSE;
+        blend_attachment.colorWriteMask = all_components;
+
+        om.attachmentCount = 1;
+        om.pAttachments    = &blend_attachment;
+
+        VkDynamicState dynamic_states[] = {
+            VK_DYNAMIC_STATE_VIEWPORT,
+            VK_DYNAMIC_STATE_SCISSOR,
+            VK_DYNAMIC_STATE_LINE_WIDTH
+        };
+
+        VkPipelineDynamicStateCreateInfo dynamic_state = { VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO };
+        dynamic_state.dynamicStateCount = ArraySize(dynamic_states);
+        dynamic_state.pDynamicStates    = dynamic_states;
+
+        Assert(pipeline->num_targets <= 8);
+
+        VkPipelineRenderingCreateInfo rendering_info = { VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO };
+        rendering_info.colorAttachmentCount    = pipeline->num_targets;
+        rendering_info.pColorAttachmentFormats = pipeline->target_formats;
+        rendering_info.depthAttachmentFormat   = pipeline->depth_format;
+
+        VkGraphicsPipelineCreateInfo create_info = {};
+        create_info.sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+        create_info.pNext               = &rendering_info;
+        create_info.stageCount          = pipeline->num_shaders;
+        create_info.pStages             = stages;
+        create_info.pVertexInputState   = &vi;
+        create_info.pInputAssemblyState = &ia;
+        create_info.pViewportState      = &vp;
+        create_info.pRasterizationState = &rs;
+        create_info.pMultisampleState   = &ms;
+        create_info.pDepthStencilState  = &ds;
+        create_info.pColorBlendState    = &om;
+        create_info.pDynamicState       = &dynamic_state;
+        create_info.layout              = pipeline->layout.pipeline;
+
+        VK_CHECK(vk->CreateGraphicsPipelines(device->handle, 0, 1, &create_info, 0, &pipeline->handle));
+    }
 }

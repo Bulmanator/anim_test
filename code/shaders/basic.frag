@@ -40,7 +40,7 @@ uniform R_Setup {
 } setup;
 
 layout(binding = 2, std430)
-buffer Materials {
+readonly buffer Materials {
     Material materials[];
 };
 

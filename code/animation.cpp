@@ -14,6 +14,13 @@
 #define CORE_IMPL 1
 #include "core.h"
 
+#include "math.cpp"
+
+#include "file_formats.h"
+#include "animation.h"
+
+#include "render.h"
+
 static void *zmalloc(size_t size) {
     void *result = malloc(size);
     memset(result, 0, size);
@@ -21,13 +28,9 @@ static void *zmalloc(size_t size) {
     return result;
 }
 
-#include "math.cpp"
+#include "vulkan.h"
 #include "vulkan.cpp"
 
-#include "render.h"
-
-#include "file_formats.h"
-#include "animation.h"
 
 // Animation file data
 //
@@ -602,7 +605,7 @@ static B32 SkeletonFileLoad(Arena *arena, A_Skeleton *skeleton, Str8 path) {
     return result;
 }
 
-static Str8 FileReadAll(const char *path) {
+static Str8 FileReadAll(Arena *arena, const char *path) {
     Str8 result = {};
 
     FILE *f = fopen(path, "rb");
@@ -611,7 +614,7 @@ static Str8 FileReadAll(const char *path) {
         result.count = ftell(f);
         fseek(f, 0, SEEK_SET);
 
-        result.data = (U8 *) malloc(result.count);
+        result.data = ArenaPush(arena, U8, result.count, ARENA_FLAG_NO_ZERO);
 
         fread(result.data, result.count, 1, f);
         fclose(f);
@@ -808,170 +811,49 @@ int main(int argc, char **argv) {
     VK_Pipeline pipeline = {};
 
     {
-        // Create a pipeline, this is extremely basic at the moment
+        VK_PipelineState *state = &pipeline.state;
+
+        state->topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+        state->cull_mode    = VK_CULL_MODE_BACK_BIT;
+        state->polygon_mode = VK_POLYGON_MODE_FILL;
+        state->front_face   = VK_FRONT_FACE_CLOCKWISE;
+
+        state->depth_test       = VK_TRUE;
+        state->depth_write      = VK_TRUE;
+        state->depth_compare_op = VK_COMPARE_OP_LESS;
+
+        pipeline.num_descriptors = 3;
+
+        pipeline.descriptors[0].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        pipeline.descriptors[1].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        pipeline.descriptors[2].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+
+        pipeline.descriptors[0].stages = VK_SHADER_STAGE_VERTEX_BIT;
+        pipeline.descriptors[1].stages = VK_SHADER_STAGE_VERTEX_BIT;
+        pipeline.descriptors[2].stages = VK_SHADER_STAGE_FRAGMENT_BIT;
+
+        pipeline.push_stages = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+        pipeline.push_size   = sizeof(R_Setup);
+
+        // render target info
         //
-        // @todo: allow fixed function to be configured
-        // @todo: allow render target setup to be configured
-        // @todo: parse pipeline layout from the spir-v source
-        //
-        VkDescriptorSetLayoutBinding bindings[3] = {};
+        pipeline.num_targets       = 1;
+        pipeline.target_formats[0] = swapchain->surface.format.format;
+        pipeline.depth_format      = VK_FORMAT_D32_SFLOAT;
 
-        bindings[0].binding         = 0;
-        bindings[0].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        bindings[0].descriptorCount = 1;
-        bindings[0].stageFlags      = VK_SHADER_STAGE_VERTEX_BIT;
+        TempArena temp = TempGet(0, 0);
 
-        bindings[1].binding         = 1;
-        bindings[1].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        bindings[1].descriptorCount = 1;
-        bindings[1].stageFlags      = VK_SHADER_STAGE_VERTEX_BIT;
+        Str8 vert_code = FileReadAll(temp.arena, "shaders/basic.vert.spv");
+        Str8 frag_code = FileReadAll(temp.arena, "shaders/basic.frag.spv");
 
-        bindings[2].binding         = 2;
-        bindings[2].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        bindings[2].descriptorCount = 1;
-        bindings[2].stageFlags      = VK_SHADER_STAGE_FRAGMENT_BIT;
+        pipeline.num_shaders = 2;
+        pipeline.shaders[0]  = VK_ShaderModuleCreate(device, vert_code);
+        pipeline.shaders[1]  = VK_ShaderModuleCreate(device, frag_code);
 
-        VkDescriptorSetLayoutCreateInfo create_info = {};
-        create_info.sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-        create_info.bindingCount = 3;
-        create_info.pBindings    = bindings;
+        VK_PipelineCreate(device, &pipeline);
 
-        VK_CHECK(vk->CreateDescriptorSetLayout(device->handle, &create_info, 0, &pipeline.set_layout));
-    }
-
-    {
-        assert(sizeof(R_Setup) == 128);
-
-        VkPushConstantRange push_constant_range = { 0 };
-        push_constant_range.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
-        push_constant_range.offset     = 0;
-        push_constant_range.size       = sizeof(R_Setup);
-
-        VkPipelineLayoutCreateInfo create_info = {};
-        create_info.sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-        create_info.setLayoutCount         = 1;
-        create_info.pSetLayouts            = &pipeline.set_layout;
-        create_info.pushConstantRangeCount = 1;
-        create_info.pPushConstantRanges    = &push_constant_range;
-
-        VK_CHECK(vk->CreatePipelineLayout(device->handle, &create_info, 0, &pipeline.layout));
-    }
-
-    {
-        Str8 code = FileReadAll("shaders/basic.vert.spv");
-
-        VkShaderModuleCreateInfo create_info = {};
-        create_info.sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-        create_info.codeSize = code.count;
-        create_info.pCode    = (U32 *) code.data;
-
-        VK_CHECK(vk->CreateShaderModule(device->handle, &create_info, 0, &pipeline.vs));
-
-        free(code.data);
-
-        code = FileReadAll("shaders/basic.frag.spv");
-
-        create_info.sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-        create_info.codeSize = code.count;
-        create_info.pCode    = (U32 *) code.data;
-
-        VK_CHECK(vk->CreateShaderModule(device->handle, &create_info, 0, &pipeline.fs));
-
-        free(code.data);
-    }
-
-    {
-        // fixed functions stuff + render attachment setup
-        //
-
-        VkPipelineShaderStageCreateInfo stages[2] = {};
-
-        stages[0].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-        stages[0].stage  = VK_SHADER_STAGE_VERTEX_BIT;
-        stages[0].module = pipeline.vs;
-        stages[0].pName  = "main";
-
-        stages[1].sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-        stages[1].stage  = VK_SHADER_STAGE_FRAGMENT_BIT;
-        stages[1].module = pipeline.fs;
-        stages[1].pName  = "main";
-
-        VkPipelineVertexInputStateCreateInfo vi = {};
-        vi.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
-
-        VkPipelineInputAssemblyStateCreateInfo ia = {};
-        ia.sType    = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
-        ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
-
-        VkPipelineViewportStateCreateInfo vp = {};
-        vp.sType         = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
-        vp.viewportCount = 1;
-        vp.scissorCount  = 1;
-
-        VkPipelineRasterizationStateCreateInfo rs = {};
-        rs.sType       = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
-        rs.polygonMode = VK_POLYGON_MODE_FILL;
-        rs.frontFace   = VK_FRONT_FACE_CLOCKWISE;
-        rs.cullMode    = VK_CULL_MODE_BACK_BIT;
-        rs.lineWidth   = 1.35f;
-
-        VkPipelineMultisampleStateCreateInfo ms = {};
-        ms.sType                = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-        ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
-
-        VkPipelineDepthStencilStateCreateInfo ds = {};
-        ds.sType            = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
-        ds.depthTestEnable  = VK_TRUE;
-        ds.depthWriteEnable = VK_TRUE;
-        ds.depthCompareOp   = VK_COMPARE_OP_LESS;
-
-        VkPipelineColorBlendAttachmentState blend_attachment = {};
-        blend_attachment.blendEnable    = VK_FALSE; // @todo: add blending
-        blend_attachment.colorWriteMask =
-            VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
-            VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
-
-        VkPipelineColorBlendStateCreateInfo om = {};
-        om.sType           = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
-        om.attachmentCount = 1;
-        om.pAttachments    = &blend_attachment;
-
-        VkDynamicState dynamic_states[] = {
-            VK_DYNAMIC_STATE_VIEWPORT,
-            VK_DYNAMIC_STATE_SCISSOR
-        };
-
-        VkPipelineDynamicStateCreateInfo dynamic_state = {};
-        dynamic_state.sType             = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
-        dynamic_state.dynamicStateCount = 2;
-        dynamic_state.pDynamicStates    = dynamic_states;
-
-        // render attachment info
-        //
-        VkFormat format = swapchain->surface.format.format;
-
-        VkPipelineRenderingCreateInfo rendering_info = {};
-        rendering_info.sType                   = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
-        rendering_info.colorAttachmentCount    = 1;
-        rendering_info.pColorAttachmentFormats = &format;
-        rendering_info.depthAttachmentFormat   = VK_FORMAT_D32_SFLOAT;
-
-        VkGraphicsPipelineCreateInfo create_info = {};
-        create_info.sType               = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
-        create_info.pNext               = &rendering_info;
-        create_info.stageCount          = 2;
-        create_info.pStages             = stages;
-        create_info.pVertexInputState   = &vi;
-        create_info.pInputAssemblyState = &ia;
-        create_info.pViewportState      = &vp;
-        create_info.pRasterizationState = &rs;
-        create_info.pMultisampleState   = &ms;
-        create_info.pDepthStencilState  = &ds;
-        create_info.pColorBlendState    = &om;
-        create_info.pDynamicState       = &dynamic_state;
-        create_info.layout              = pipeline.layout;
-
-        VK_CHECK(vk->CreateGraphicsPipelines(device->handle, 0, 1, &create_info, 0, &pipeline.handle));
+        TempRelease(&temp);
     }
 
     // for vertex data
@@ -1287,7 +1169,7 @@ int main(int argc, char **argv) {
             alloc_info.sType              = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
             alloc_info.descriptorPool     = frame->descriptor_pool;
             alloc_info.descriptorSetCount = 1;
-            alloc_info.pSetLayouts        = &pipeline.set_layout;
+            alloc_info.pSetLayouts        = &pipeline.layout.set;
 
             VK_CHECK(vk->AllocateDescriptorSets(device->handle, &alloc_info, &set));
         }
@@ -1336,8 +1218,10 @@ int main(int argc, char **argv) {
             vk->UpdateDescriptorSets(device->handle, 3, writes, 0, 0);
         }
 
-        vk->CmdBindDescriptorSets(cmds, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline.layout, 0, 1, &set, 0, 0);
-        vk->CmdPushConstants(cmds, pipeline.layout,
+        vk->CmdBindDescriptorSets(cmds, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                pipeline.layout.pipeline, 0, 1, &set, 0, 0);
+
+        vk->CmdPushConstants(cmds, pipeline.layout.pipeline,
                 VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(R_Setup), &setup);
 
         vk->CmdDrawIndexed(cmds, mesh.num_indices, 1, 0, 0, 0);

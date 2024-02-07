@@ -32,12 +32,12 @@ uniform R_Setup {
 } setup;
 
 layout(binding = 0, scalar)
-buffer Vertices {
+readonly buffer Vertices {
     Vertex vertices[];
 };
 
 layout(binding = 1, std430, row_major)
-buffer Bones {
+readonly buffer Bones {
     mat4 bones[];
 };
 
