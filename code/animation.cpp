@@ -823,19 +823,6 @@ int main(int argc, char **argv) {
         state->depth_write      = VK_TRUE;
         state->depth_compare_op = VK_COMPARE_OP_LESS;
 
-        pipeline.num_descriptors = 3;
-
-        pipeline.descriptors[0].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        pipeline.descriptors[1].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        pipeline.descriptors[2].type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-
-        pipeline.descriptors[0].stages = VK_SHADER_STAGE_VERTEX_BIT;
-        pipeline.descriptors[1].stages = VK_SHADER_STAGE_VERTEX_BIT;
-        pipeline.descriptors[2].stages = VK_SHADER_STAGE_FRAGMENT_BIT;
-
-        pipeline.push_stages = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
-        pipeline.push_size   = sizeof(R_Setup);
-
         // render target info
         //
         pipeline.num_targets       = 1;
@@ -848,8 +835,9 @@ int main(int argc, char **argv) {
         Str8 frag_code = FileReadAll(temp.arena, "shaders/basic.frag.spv");
 
         pipeline.num_shaders = 2;
-        pipeline.shaders[0]  = VK_ShaderModuleCreate(device, vert_code);
-        pipeline.shaders[1]  = VK_ShaderModuleCreate(device, frag_code);
+
+        VK_ShaderCreate(device, &pipeline.shaders[0], vert_code);
+        VK_ShaderCreate(device, &pipeline.shaders[1], frag_code);
 
         VK_PipelineCreate(device, &pipeline);
 

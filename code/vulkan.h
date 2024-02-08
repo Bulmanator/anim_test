@@ -10,6 +10,8 @@
 #define VK_NO_PROTOTYPES 1
 #include <vulkan/vulkan.h>
 
+#include <spirv-headers/spirv.h>
+
 #define VK_CHECK(x) assert((x) == VK_SUCCESS)
 
 #define VK_FRAME_COUNT     2 // number of processing frames in flight
@@ -168,6 +170,23 @@ struct VK_DescriptorInfo {
     VkShaderStageFlags stages;
 };
 
+struct VK_Shader {
+    VkShaderModule handle;
+
+    VkShaderStageFlags stage;
+
+    // @todo: we currently assume that the entrypoint of every shader is just "main", the
+    // spir-v actually tells us this and we parse it anyway when getting the execution model so maybe
+    // copy it and use it here
+    //
+    // :shader_entry
+    //
+
+    B16 has_push_constants;
+    U16 resource_mask;
+    VkDescriptorType resources[16];
+};
+
 struct VK_Pipeline {
     VkPipeline handle;
 
@@ -181,15 +200,7 @@ struct VK_Pipeline {
     // no support for tesselation or geometry shaders. @todo: mesh shading!
     //
     U32 num_shaders;
-    VkShaderModule shaders[3];
-
-    // @todo: this doesn't need to be here, can just parse the spir-v source to get this information
-    //
-    U32 num_descriptors;
-    VK_DescriptorInfo descriptors[8];
-
-    VkShaderStageFlags push_stages;
-    U64 push_size;
+    VK_Shader shaders[3];
 
     U32 num_targets;
     VkFormat target_formats[8];

@@ -791,57 +791,78 @@ static void VK_BufferCreate(VK_Device *device, VK_Buffer *buffer) {
     if (buffer->host_mapped) { vk->MapMemory(device->handle, buffer->memory, 0, buffer->size, 0, &buffer->data); }
 }
 
-Function VkShaderModule VK_ShaderModuleCreate(VK_Device *device, Str8 code) {
-    VkShaderModule result = VK_NULL_HANDLE;
-
-    VK_Context *vk = device->vk;
-
-    VkShaderModuleCreateInfo create_info = {};
-    create_info.sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
-    create_info.codeSize = code.count;
-    create_info.pCode    = cast(U32 *) code.data;
-
-    VK_CHECK(vk->CreateShaderModule(device->handle, &create_info, 0, &result));
-
-    return result;
-}
-
 Function void VK_PipelineCreate(VK_Device *device, VK_Pipeline *pipeline) {
     VK_Context *vk = device->vk;
 
-    VkDescriptorSetLayoutBinding bindings[8] = { 0 };
+    U32 resource_mask = 0;
+    U32 num_bindings  = 0;
 
-    for (U32 it = 0; it < pipeline->num_descriptors; ++it) {
-        VK_DescriptorInfo *info = &pipeline->descriptors[it];
-        VkDescriptorSetLayoutBinding *binding = &bindings[it];
+    VkShaderStageFlags push_constants_stages  = 0;
+    VkDescriptorSetLayoutBinding bindings[16] = { 0 };
 
-        binding->binding         = it;
-        binding->descriptorType  = info->type;
-        binding->descriptorCount = 1;
-        binding->stageFlags      = info->stages;
+    for (U32 s = 0; s < pipeline->num_shaders; ++s) {
+        VK_Shader *shader = &pipeline->shaders[s];
+
+        for (U32 it = 0; it < ArraySize(bindings); ++it) {
+            if (shader->resource_mask & (1 << it)) {
+                // This shader uses this binding
+                //
+                VkDescriptorSetLayoutBinding *binding = &bindings[num_bindings];
+
+                if ((resource_mask & (1 << it)) == 0) {
+                    binding->binding          = it;
+                    binding->descriptorType   = shader->resources[it];
+                    binding->descriptorCount  = 1; // Maybe this can be parsed from the shader code!
+
+                    resource_mask |= (1 << it);
+                    num_bindings  += (1);
+                }
+                else {
+                    Assert(binding->descriptorType == shader->resources[it]);
+                }
+
+                binding->stageFlags |= shader->stage;
+            }
+        }
+
+        if (shader->has_push_constants) { push_constants_stages |= shader->stage; }
     }
 
     {
         VkDescriptorSetLayoutCreateInfo create_info = { 0 };
         create_info.sType        = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-        create_info.bindingCount = pipeline->num_descriptors;
+        create_info.bindingCount = num_bindings;
         create_info.pBindings    = bindings;
 
         VK_CHECK(vk->CreateDescriptorSetLayout(device->handle, &create_info, 0, &pipeline->layout.set));
     }
 
     {
+        // If there are push constants used we just give them the entire 128 byte size guaranteed by the
+        // spec, old AMD cards only suppor this minimum value so its a safe bet. We should probably
+        // parse the size of the structure from the source just in case anyway.
+        //
+        // For Nvidia it is a pretty safe bet to have 256 bytes, it has been like that since the GTX 600 series
+        // across all platforms, even early drivers.
+        //
+        // For AMD and Intel it is a mess, some drivers support 128, 256 or even 4096 bytes, can vary
+        // for the same card across operating systems (which is insane) so sticking to 128 as it is mandated
+        // by the spec is probably safe for now
+        //
         VkPushConstantRange range = { 0 };
-        range.stageFlags = pipeline->push_stages;
+        range.stageFlags = push_constants_stages;
         range.offset     = 0;
-        range.size       = cast(U32) pipeline->push_size;
+        range.size       = 128;
 
         VkPipelineLayoutCreateInfo create_info = { 0 };
         create_info.sType                  = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
         create_info.setLayoutCount         = 1;
         create_info.pSetLayouts            = &pipeline->layout.set;
-        create_info.pushConstantRangeCount = 1;
-        create_info.pPushConstantRanges    = &range;
+
+        if (push_constants_stages != 0) {
+            create_info.pushConstantRangeCount = 1;
+            create_info.pPushConstantRanges    = &range;
+        }
 
         VK_CHECK(vk->CreatePipelineLayout(device->handle, &create_info, 0, &pipeline->layout.pipeline));
     }
@@ -854,12 +875,13 @@ Function void VK_PipelineCreate(VK_Device *device, VK_Pipeline *pipeline) {
         VkPipelineShaderStageCreateInfo stages[3] = {};
 
         for (U32 it = 0; it < pipeline->num_shaders; ++it) {
+            VK_Shader *shader = &pipeline->shaders[it];
             VkPipelineShaderStageCreateInfo *stage = &stages[it];
 
             stage->sType  = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-            stage->stage  = (it == 0) ? VK_SHADER_STAGE_VERTEX_BIT : VK_SHADER_STAGE_FRAGMENT_BIT; // insane you have to pass this
-            stage->module = pipeline->shaders[it];
-            stage->pName  = "main";
+            stage->stage  = cast(VkShaderStageFlagBits) shader->stage;
+            stage->module = shader->handle;
+            stage->pName  = "main"; // :shader_entry
         }
 
         VkPipelineVertexInputStateCreateInfo   vi = { VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO };
@@ -937,4 +959,170 @@ Function void VK_PipelineCreate(VK_Device *device, VK_Pipeline *pipeline) {
 
         VK_CHECK(vk->CreateGraphicsPipelines(device->handle, 0, 1, &create_info, 0, &pipeline->handle));
     }
+}
+
+struct VK_SpirvId {
+    U32 op;
+    U32 type;
+    U32 storage_class;
+
+    U32 set;
+    U32 binding;
+};
+
+Function VkShaderStageFlags VK_SpvExecutionModelToShaderStage(U32 model) {
+    VkShaderStageFlags result = cast(VkShaderStageFlags) 0;
+
+    switch (model) {
+        case SpvExecutionModelVertex:   { result = VK_SHADER_STAGE_VERTEX_BIT;   } break;
+        case SpvExecutionModelFragment: { result = VK_SHADER_STAGE_FRAGMENT_BIT; } break;
+        case SpvExecutionModelKernel:   { result = VK_SHADER_STAGE_COMPUTE_BIT;  } break;
+        case SpvExecutionModelTaskEXT:  { result = VK_SHADER_STAGE_TASK_BIT_EXT; } break;
+        case SpvExecutionModelMeshEXT:  { result = VK_SHADER_STAGE_MESH_BIT_EXT; } break;
+    }
+
+    return result;
+}
+
+Function VkDescriptorType VK_SpvOpTypeToDescriptorType(U32 type) {
+    VkDescriptorType result = cast(VkDescriptorType) 0;
+
+    switch (type) {
+        case SpvOpTypeStruct:       { result = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;         } break;
+        case SpvOpTypeImage:        { result = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;          } break;
+        case SpvOpTypeSampler:      { result = VK_DESCRIPTOR_TYPE_SAMPLER;                } break;
+        case SpvOpTypeSampledImage: { result = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; } break;
+    }
+
+    return result;
+}
+
+Function void VK_ShaderSourceParse(VK_Shader *shader, Str8 spv) {
+    U32 *start = cast(U32 *) (spv.data);
+    U32 *end   = cast(U32 *) (spv.data + spv.count);
+
+    if (start[0] != SpvMagicNumber) {
+        printf("[ERR] :: Not spir-v shader byte code\n");
+        return;
+    }
+
+    // :note this is very simple at the moment and all it does is gather the resources
+    // the shader uses so we can create the descriptor set layout and pipeline layout
+    // automatically
+    //
+    // there is a lot of stuff in the SPIR-V spec that might be useful to parse out of the code,
+    // especially for debugging purposes
+    //
+    // it is kinda insane we have to do this just to know the resources the shader and driver knows
+    // all of this stuff why do we have to manually input it???
+    //
+
+    TempArena temp = TempGet(0, 0);
+
+    U32 bound = start[3];
+    VK_SpirvId *ids = ArenaPush(temp.arena, VK_SpirvId, bound);
+
+    U32 *at = &start[5];
+    while (at < end) {
+        U16 op    = at[0]  & SpvOpCodeMask;
+        U16 count = at[0] >> SpvWordCountShift;
+
+        switch (op) {
+            case SpvOpEntryPoint: {
+                U32 model = at[1];
+                shader->stage = VK_SpvExecutionModelToShaderStage(model);
+            }
+            break;
+            case SpvOpDecorate: {
+                // decorate will tell us the binding and descriptor set that shader resources are
+                // part of
+                //
+                U32 target     = at[1];
+                U32 decoration = at[2];
+
+                if (decoration == SpvDecorationDescriptorSet) {
+                    ids[target].set = at[3];
+                }
+                else if (decoration == SpvDecorationBinding) {
+                    ids[target].binding = at[3];
+                }
+            }
+            break;
+            case SpvOpTypePointer: {
+                U32 target = at[1];
+
+                ids[target].op            = op;
+                ids[target].storage_class = at[2];
+                ids[target].type          = at[3];
+            }
+            break;
+            case SpvOpVariable: {
+                U32 target = at[2];
+
+                ids[target].op            = op;
+                ids[target].type          = at[1];
+                ids[target].storage_class = at[3];
+            }
+            break;
+            case SpvOpTypeStruct:
+            case SpvOpTypeImage:
+            case SpvOpTypeSampler:
+            case SpvOpTypeSampledImage: {
+                U32 target = at[1];
+
+                ids[target].op = op;
+            }
+            break;
+        }
+
+        at += count;
+    }
+
+    // SPIR-V spec says '0 < id < bound' so seems zero is unused
+    //
+    for (U32 it = 1; it < bound; ++it) {
+        VK_SpirvId *id = &ids[it];
+
+        if (id->op == SpvOpVariable) {
+            switch (id->storage_class) {
+                case SpvStorageClassStorageBuffer:
+                case SpvStorageClassUniformConstant:
+                case SpvStorageClassUniform: {
+                    // This has double indirection because variables are pointers to the actual type
+                    //
+                    VK_SpirvId *pointer = &ids[id->type];
+                    VK_SpirvId *type    = &ids[pointer->type];
+
+                    // We currently don't support multiple descriptor sets, I don't know if its even
+                    // worth it?
+                    //
+                    Assert(id->set == 0);
+                    Assert(pointer->op == SpvOpTypePointer);
+
+                    shader->resource_mask |= (1 << id->binding);
+                    shader->resources[id->binding] = VK_SpvOpTypeToDescriptorType(type->op);
+                }
+                break;
+                case SpvStorageClassPushConstant: {
+                    shader->has_push_constants = true;
+                }
+                break;
+            }
+        }
+    }
+
+    TempRelease(&temp);
+}
+
+Function void VK_ShaderCreate(VK_Device *device, VK_Shader *shader, Str8 code) {
+    VK_Context *vk = device->vk;
+
+    VK_ShaderSourceParse(shader, code);
+
+    VkShaderModuleCreateInfo create_info = {};
+    create_info.sType    = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    create_info.codeSize = code.count;
+    create_info.pCode    = cast(U32 *) code.data;
+
+    VK_CHECK(vk->CreateShaderModule(device->handle, &create_info, 0, &shader->handle));
 }
