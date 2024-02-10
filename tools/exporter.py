@@ -29,12 +29,7 @@ AMTS_VERSION = 1
 AMTM_MAGIC   = 0x4D544D41 # 'AMTM'
 AMTM_VERSION = 1
 
-R_MESH_FLAG_HAS_SKELETON = 0x1
-
-R_TEXTURE_TYPE_BASE_COLOUR = 1
-R_TEXTURE_TYPE_ROUGHNESS   = 2
-R_TEXTURE_TYPE_METALLIC    = 3
-R_TEXTURE_TYPE_NORMAL      = 4
+R_MESH_FLAG_IS_SKINNED = 0x1
 
 AXES = [
     ("X", "X", "", 1), ("-X", "-X", "", 2),
@@ -46,6 +41,8 @@ MATERIAL_PROPERTIES = [
         "Base Color", "Metallic", "Roughness", "IOR", "Anisotropic", "Anisotropic Rotation",
         "Coat Weight", "Coat Roughness", "Sheen Weight", "Sheen Roughness"
 ]
+
+TEXTURE_NAMES = { "Base Color" : 0, "Normal" : 1, "Metallic" : 2, "Roughness" : 3, "Occlusion" : 4, "Displacement" : 5 }
 
 # Skeleton storage classes
 
@@ -116,101 +113,59 @@ class R_Vertex:
         return hash((self.position, self.uv, self.normal, self.material_index, \
                 sum(self.joint_indices), sum(self.joint_weights)))
 
+class R_Texture:
+    def __init__(self, name, index, num_channels):
+        self.name         = name
+
+        self.name_offset  = 0
+        self.name_count   = 0
+
+        self.index        = index
+        self.flags        = 0 # flags are reserved for now
+        self.num_channels = num_channels
+
 class R_Material:
     def __init__(self, name, index, material):
-        self.name       = name
-        self.index      = index
+        self.name        = name
+        self.name_offset = 0 # filled out later
+        self.name_count  = 0
 
-        # filled out later
+        self.index    = index
+        self.material = material
+
+        # Materials have a list of properties and a list of texture indices, we pull the local list of
+        # textures and then repatch the indices later
+        self.colour     = (1, 1, 1, 1)
+        self.properties = [0, 0.5, 1.45, 0, 0, 0, 0.05, 0, 0.5, 0]
+
+        self.textures = [-1, -1, -1, -1, -1, -1, -1, -1]
+
+        if material.use_nodes and "Principled BSDF" in material.node_tree.nodes:
+            bsdf = material.node_tree.nodes["Principled BSDF"]
+
+            # Save the RGBA default colour, may be have a texture override
+            self.colour = bsdf.inputs["Base Color"].default_value[:]
+
+            self.properties[0] = bsdf.inputs["Metallic"            ].default_value
+            self.properties[1] = bsdf.inputs["Roughness"           ].default_value
+            self.properties[2] = bsdf.inputs["IOR"                 ].default_value
+            self.properties[3] = bsdf.inputs["Anisotropic"         ].default_value
+            self.properties[4] = bsdf.inputs["Anisotropic Rotation"].default_value
+            self.properties[5] = bsdf.inputs["Coat Weight"         ].default_value
+            self.properties[6] = bsdf.inputs["Coat Roughness"      ].default_value
+            self.properties[7] = bsdf.inputs["Sheen Weight"        ].default_value
+            self.properties[8] = bsdf.inputs["Sheen Roughness"     ].default_value
+
+class R_Mesh:
+    def __init__(self, name, armature, vertices, indices):
+        self.name        = name
         self.name_offset = 0
         self.name_count  = 0
-        # Material properties map from a name in MATERIAL_PROPERTIES to a tuple which contains three values,
-        # (default_value, image, channel_mask), if there is not an image associated with the property then
-        # image and channel mask will both be 0
-        #
-        self.properties = {}
 
-        bsdf = None
+        self.vertices = vertices
+        self.indices  = indices
+        self.flags    = R_MESH_FLAG_IS_SKINNED if armature else 0
 
-        if material.use_nodes:
-            for n in material.node_tree.nodes:
-                if n.type == "BSDF_PRINCIPLED":
-                    bsdf = n
-                    break
-
-        if not bsdf:
-            # Non-node based/unsupported material, we can only pull basic things from this
-            self.properties["Base Color"] = (material.diffuse_color, 0, 0)
-            self.properties["Metallic"]   = (material.metallic, 0, 0)
-            self.properties["Roughness"]  = (material.roughness, 0, 0)
-
-            # We can't get any of these values so just use blender defaults
-            self.properties["IOR"] = (1.45, 0, 0)
-
-            self.properties["Anisotropic"]          = (0, 0, 0)
-            self.properties["Anisotropic Rotation"] = (0, 0, 0)
-
-            self.properties["Coat Weight"]    = (0, 0, 0)
-            self.properties["Coat Roughness"] = (0.03, 0, 0)
-
-            self.properties["Sheen Weight"]    = (0, 0, 0)
-            self.properties["Sheen Roughness"] = (0.5, 0, 0)
-        else:
-            for name in MATERIAL_PROPERTIES:
-                node = bsdf.inputs[name]
-                if node.is_linked:
-                    link = node.links[0]
-                    if link.from_node.type == "TEX_IMAGE":
-                        # Direct from texture with all channels present in the image
-                        image = link.from_node.image
-                        self.properties[name] = (node.default_value, image, (1 << image.channels) - 1)
-                    elif link.from_node.type == "SEPARATE_COLOR":
-                        # Separate out specific channels
-                        #
-                        # Calculate channel mask we for the channel that is being separated out
-                        #
-                        channel_index = 0x0
-                        for output in link.from_node.outputs:
-                            if not output.is_linked: continue
-
-                            if output.links[0].to_socket.name == name:
-                                # This is linked to the input on the BSDF node
-                                if   output.name == "Red":   channel_index = 0x0
-                                elif output.name == "Green": channel_index = 0x1
-                                elif output.name == "Blue":  channel_index = 0x2
-
-                                break
-
-                        input_node = link.from_node.inputs["Color"]
-                        if input_node.is_linked:
-                            colour_node = input_node.links[0].from_node
-                            if colour_node.type == "TEX_IMAGE":
-                                self.properties[name] = (input_node.default_value[channel_index], colour_node.image, 1 << channel_index)
-                            elif colour_node.type == "RGB":
-                                self.properties[name] = (colour_node.outputs["Color"].default_value[channel_index], 0, 0)
-                            elif colour_node.type == "VALUE":
-                                self.properties[name] = (colour_node.outputs["Value"].default_value, 0, 0)
-                            else:
-                                print("[WRN] :: Unsupported link type " + colour_node.type)
-                                self.properties[name] = (input_node.default_value[channel_index], 0, 0)
-                        else:
-                            self.properties[name] = (input_node.default_value[channel_index], 0, 0)
-                    elif link.from_node.type == "RGB":
-                        # Static RGB value
-                        self.properties[name] = (link.from_node.outputs["Color"].default_value, 0, 0)
-                    elif link.from_node.type == "VALUE":
-                        # Single greyscale value across all channels
-                        self.properties[name] = (link.from_node.outputs["Value"].default_value, 0, 0)
-                    else:
-                        # unsupported type
-                        print("[WRN] :: Unsupported link type " + link.from_node.type)
-                        self.properties[name] = (node.default_value, 0, 0)
-                else:
-                    self.properties[name] = (node.default_value, 0, 0)
-
-            # @todo: need to get the normal map, it is a texture only thing
-            #
-            # bsdf.inputs["Normal"]
 
 # File output functions
 
@@ -222,6 +177,9 @@ def U16Write(file, value):
 
 def U32Write(file, value):
     file.write(struct.pack("<I", value))
+
+def S32Write(file, value):
+    file.write(struct.pack("<i", value))
 
 def F32Write(file, value):
     file.write(struct.pack("<f", value))
@@ -279,29 +237,27 @@ def R_MeshJointWeightsNormalise(weights):
 
     return result
 
-def R_MaterialsWrite(file_handle, materials):
+def R_MaterialsWrite(file, materials):
     for material in materials.values():
-        colour = material.properties["Base Color"][0] # default_value
-        F32Write(file_handle, colour[0])
-        F32Write(file_handle, colour[1])
-        F32Write(file_handle, colour[2])
-        F32Write(file_handle, colour[3])
+        U16Write(file, material.name_offset)
+        U8Write(file, material.name_count)
+        U8Write(file, 0) # reserved flags
 
-        F32Write(file_handle, material.properties["Roughness"][0])
-        F32Write(file_handle, material.properties["Metallic"][0])
-        F32Write(file_handle, material.properties["IOR"][0])
+        # @todo: I don't think this is in the right order
+        U8Write(file, int(material.colour[0] * 255))
+        U8Write(file, int(material.colour[1] * 255))
+        U8Write(file, int(material.colour[2] * 255))
+        U8Write(file, int(material.colour[3] * 255))
 
-        F32Write(file_handle, material.properties["Anisotropic"][0])
-        F32Write(file_handle, material.properties["Anisotropic Rotation"][0])
+        for p in material.properties: F32Write(file, p)
+        for t in material.textures:   S32Write(file, t)
 
-        F32Write(file_handle, material.properties["Coat Weight"][0])
-        F32Write(file_handle, material.properties["Coat Roughness"][0])
-
-        F32Write(file_handle, material.properties["Sheen Weight"][0])
-        F32Write(file_handle, material.properties["Sheen Roughness"][0])
-
-        U16Write(file_handle, material.name_count)
-        U16Write(file_handle, material.name_offset)
+def R_TextureInfoWrite(file, textures):
+    for t in textures.values():
+        U16Write(file, t.name_offset)
+        U16Write(file, t.name_count)
+        U16Write(file, t.flags)
+        U16Write(file, t.num_channels)
 
 def R_MeshVerticesWrite(file_handle, vertices, has_skeleton):
     for v in vertices:
@@ -323,13 +279,6 @@ def R_MeshVerticesWrite(file_handle, vertices, has_skeleton):
 
             for i in v.joint_indices:  U8Write(file_handle, i)
             for w in weights:         F32Write(file_handle, w)
-
-
-def DumpMaterials(materials):
-    for k, v in materials.items():
-        print("[" + str(v.index) + "]: " + k + ":")
-        for name, prop in v.properties.items():
-            print("   [" + name + "]: " + str(prop))
 
 def AxisMappingMatrixGet():
     return axis_conversion("-Y", "Z", bpy.context.scene.export_properties.forward_axis, bpy.context.scene.export_properties.up_axis).to_4x4()
@@ -473,37 +422,87 @@ def A_SkeletonExport():
 
 # Mesh gather and export functions
 
+def R_LinkedTextureNodesFind(linked_nodes, node, channel_mask):
+    for it, output in enumerate(node.outputs):
+        if not output.is_linked: continue
+
+        new_mask = (1 << it) if node.type == "SEPARATE_COLOR" else channel_mask
+
+        # @todo: this assumes one link per node, should probably iterate over the links if there's more
+        # than one!
+        #
+        link = output.links[0]
+        if link.to_node.type == "BSDF_PRINCIPLED":
+            # We have found a link to the actual material output so we append a tuple containing the
+            # name of the socket it is connected to and the channel mask for the texture we started at
+            # as it may have been modified in between by SEPARATE_COLOR nodes
+            #
+            linked_nodes.append((link.to_socket.name, new_mask))
+        else:
+            R_LinkedTextureNodesFind(linked_nodes, link.to_node, new_mask)
+
 def R_MeshExport():
-    meshes = MeshListGet()
-    if len(meshes) == 0:
+    mesh_list = MeshListGet()
+    if len(mesh_list) == 0:
         return { 'CANCELLED' }
 
     axis_mapping_matrix = AxisMappingMatrixGet()
     modified_scene      = bpy.context.evaluated_depsgraph_get()
 
-    total_vertices = 0
-    total_indices  = 0
-    total_meshes   = len(meshes)
-
+    # Collect all material information, it would be nice if we could just do bpy.data.materials but
+    # that is inconsistent with the number of materials that are actually used... because blender I guess
+    #
+    # For example, a test model I have uses a single material slot, there is only one visible in the UI,
+    # yet bpy.data.materials has 59 materials in it??
+    #
     materials = {}
-    vertices  = {}
-    indices   = []
+    textures  = {}
+    for o in mesh_list:
+        for slot in o.material_slots:
+            if not slot.name in materials:
+                index = len(materials)
+                materials[slot.name] = R_Material(slot.name, index, slot.material)
 
-    flags = 0x0
+    # Look through all of the materials and pull out textures linked to them
+    for name, m in materials.items():
+        if not m.material.use_nodes: continue
+
+        for node in m.material.node_tree.nodes:
+            if node.type == "TEX_IMAGE":
+                linked_nodes = []
+                R_LinkedTextureNodesFind(linked_nodes, node, 0xF)
+                if len(linked_nodes) > 0:
+                    name  = bpy.path.basename(bpy.path.abspath(node.image.filepath)).split('.')[0]
+                    index = 0
+                    if not name in textures:
+                        index = len(textures)
+                        textures[name] = R_Texture(name, index, node.image.channels)
+                    else:
+                        index = textures[name].index
+
+                    for link in linked_nodes:
+                        if not link[0] in TEXTURE_NAMES: continue
+
+                        type_index = TEXTURE_NAMES[link[0]]
+                        value = (link[1] << 24) | index
+
+                        m.textures[type_index] = value
 
     # This expects each mesh that is animated to only have a single armature
     # attached, this may or may not be the common case. if it is not the common
     # case we can always change it in the future
-    for base_object in meshes:
+    meshes = []
+    for o in mesh_list:
+        vertices  = {}
+        indices   = []
+
         base_pose = "REST"
-        armature  = MeshAttachedArmatureGet(base_object)
-        if armature:
-            base_pose = ArmaturePoseSet(armature, "REST")
-            flags    |= R_MESH_FLAG_HAS_SKELETON
+        armature  = MeshAttachedArmatureGet(o)
+        if armature: base_pose = ArmaturePoseSet(armature, "REST")
 
         # @todo: do we even need to call evaluated_depsgraph_get() again?
-        mesh = base_object.evaluated_get(modified_scene).to_mesh(preserve_all_data_layers = True, depsgraph = bpy.context.evaluated_depsgraph_get())
-        mesh.transform(axis_mapping_matrix @ base_object.matrix_world)
+        mesh = o.evaluated_get(modified_scene).to_mesh(preserve_all_data_layers = True, depsgraph = bpy.context.evaluated_depsgraph_get())
+        mesh.transform(axis_mapping_matrix @ o.matrix_world)
 
         MeshTriangulate(mesh)
 
@@ -517,22 +516,15 @@ def R_MeshExport():
 
             # Material names are unique so we can store them in a dictionary becasue the
             # material slots for polygons are local to the mesh
-            material_index = 0
-            material_name  = base_object.material_slots[p.material_index].name
-            if not material_name in materials:
-                material_index = len(materials)
-                material       = base_object.material_slots[p.material_index].material
-
-                materials[material_name] = R_Material(material_name, material_index, material)
-            else:
-                material_index = materials[material_name].index
+            material_name  = o.material_slots[p.material_index].name
+            material_index = materials[material_name].index
 
             for it in p.loop_indices:
                 loop = mesh.loops[it]
 
                 position = mesh.vertices[loop.vertex_index].undeformed_co.copy()
                 normal   = loop.normal.copy()
-                uv = mesh.uv_layers.active.data[loop.index].uv.copy()
+                uv       = mesh.uv_layers.active.data[loop.index].uv.copy()
 
                 if bpy.context.scene.export_properties.flip_uv_y:
                     uv.y = 1 - uv.y
@@ -550,7 +542,7 @@ def R_MeshExport():
                     for group in mesh.vertices[loop.vertex_index].groups:
                         if bone_count < 4:
                             group_index = group.group
-                            bone_name   = base_object.vertex_groups[group_index].name
+                            bone_name   = o.vertex_groups[group_index].name
                             bone_index  = armature.data.bones.find(bone_name)
 
                             if bone_index >= 0:
@@ -569,31 +561,30 @@ def R_MeshExport():
 
                 indices.append(vertices[vertex])
 
-        if armature: ArmaturePoseSet(armature, base_pose)
+        # Store the mesh information for later
+        r_mesh = R_Mesh(o.name, armature, vertices.keys(), indices)
+        meshes.append(r_mesh)
 
-    DumpMaterials(materials)
-    print("Vertex count: " + str(len(vertices)))
-    print("Index  count: " + str(len(indices)) + " Num Triangles: " + str(len(indices) / 3.0))
+        if armature: ArmaturePoseSet(armature, base_pose)
 
     filename    = bpy.path.basename(bpy.data.filepath).split('.')[0] + ".amtm"
     output_path = bpy.context.scene.export_properties.output_dir + filename
     file_handle = open(bpy.path.abspath(output_path), "wb")
 
+    ### Header begin
+
     U32Write(file_handle, AMTM_MAGIC)
     U32Write(file_handle, AMTM_VERSION)
 
-    U32Write(file_handle, flags)
-
-    U32Write(file_handle, 1) # num_meshes @incomplete: this needs to split up large meshes
-    U32Write(file_handle, len(vertices))
-    U32Write(file_handle, len(indices))
-
+    U32Write(file_handle, len(meshes))
     U32Write(file_handle, len(materials))
-    U32Write(file_handle, 0) # @incomplete: no textures being written out
+    U32Write(file_handle, len(textures))
 
     # Gather string table
+    #
     # @incomplete: once we start writing textures we will have to look in the material and get all of
     # the texture names to write out as well, probably need somewhere to store the offset/length info as well
+    #
     string_table = []
     string_table_offset = 0
 
@@ -606,24 +597,52 @@ def R_MeshExport():
 
         string_table_offset += material.name_count
 
+    for name, texture in textures.items():
+        encoded = name.encode('utf-8')
+        string_table.append(encoded)
+
+        texture.name_offset = string_table_offset
+        texture.name_count  = len(encoded)
+
+        string_table_offset += texture.name_count
+
+    for mesh in meshes:
+        encoded = mesh.name.encode('utf-8')
+        string_table.append(encoded)
+
+        mesh.name_offset = string_table_offset
+        mesh.name_count  = len(encoded)
+
+        string_table_offset += mesh.name_count
+
     # string_table_offset will hold the full size of the string table at the end
     U32Write(file_handle, string_table_offset)
 
-    for it in range(0, 7): U32Write(file_handle, 0)
+    for it in range(0, 10): U32Write(file_handle, 0)
+
+    ### Header end
 
     # Write string table
     for s in string_table: file_handle.write(s)
 
-    # Write default mesh, when we split up large meshes this will change
-    U32Write(file_handle, 0) # base vertex
-    U32Write(file_handle, 0) # base index
-    U32Write(file_handle, len(indices)) # num indices
-
+    # Write material info
     R_MaterialsWrite(file_handle, materials)
-    R_MeshVerticesWrite(file_handle, vertices.keys(), (flags & R_MESH_FLAG_HAS_SKELETON) != 0)
 
-    for i in indices:
-        U16Write(file_handle, i)
+    # Write texture info
+    R_TextureInfoWrite(file_handle, textures)
+
+    # Write mesh info
+    for mesh in meshes:
+        U32Write(file_handle, len(mesh.vertices))
+        U32Write(file_handle, len(mesh.indices))
+
+        U8Write(file_handle, mesh.flags)
+        U8Write(file_handle, mesh.name_count)
+        U16Write(file_handle, mesh.name_offset)
+
+        R_MeshVerticesWrite(file_handle, mesh.vertices, (mesh.flags & R_MESH_FLAG_IS_SKINNED) != 0)
+
+        for i in mesh.indices: U16Write(file_handle, i)
 
     return { 'FINISHED' }
 

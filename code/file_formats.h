@@ -142,8 +142,113 @@ Function void AMTS_SkeletonCopyFromData(Arena *arena, AMTS_Skeleton *skeleton, S
 
 // Mesh (AMTM) file format
 //
-// [ Header ]
+// [ Header       ]
+// [ String Table ]
+// [ Materials    ]
+// [ Texture Info ]
+// [ Mesh Info    ]
+//   - [ Vertex Data ] // per mesh
+//   - [ Index Data  ] // per mesh
 //
-// @incomplete: needs more thought
+// Header {
+//     U32 magic;   // == AMTM
+//     U32 version; // == 1
+//
+//     U32 num_meshes;
+//
+//     U32 num_materials;
+//     U32 num_textures;
+//
+//     U32 string_table_count;
+//
+//     U32 pad[10]; // to 64 bytes
+// }
+//
+// String Table {
+//     U8 data[header.string_table_count];
+// }
+//
+// Material {
+//     U16 name_offset;
+//     U8  name_count;
+//     U8  flags;
+//
+//     U32 colour; // RGBA little-endian
+//
+//     F32 properties[10];
+//     U32 textures[8];   // -1 if unused, [8 bit channel_mask] [24 bit index]
+// }
+//
+// TextureInfo {
+//     U16 name_offset;
+//     U16 name_count;
+//
+//     U16 flags;
+//     U16 num_channels;
+// }
+//
+// Texture data is not stored directly in the file, the name corresponds to the basename of the texture
+// file. This excludes the extension and the user is free to decide how these names are used to link material
+// textures with its corresponding data.
+//
+// MeshInfo {
+//     U32 num_vertices;
+//     U32 num_indices;
+//
+//     U8  flags;
+//     U8  name_count;
+//     U16 name_offset; // from beginning of the string table
+// }
+//
+// Skinned vertices are used if the prior mesh info has the IS_SKINNED flag set, otherwise
+// only normal vertices are used
+//
+// Vertex {
+//     F32 position[3];
+//     F32 uv[2];
+//     F32 normal[3];
+//
+//     U32 material_index;
+// }
+//
+// SkinnedVertex {
+//     F32 position[3];
+//     F32 uv[2];
+//     F32 normal[3];
+//
+//     U32 material_index;
+//
+//     U8  bone_indices[4];
+//     F32 bone_indices[4];
+// }
+//
+// Index {
+//     U16 value;
+// }
+//
+// Properties ordering:
+//     METALLIC
+//     ROUGHNESS
+//     IOR
+//     ANISOTROPIC
+//     ANISOTROPIC_ROTATION
+//     COAT_WEIGHT
+//     COAT_ROUGHNESS
+//     SHEEN_WEIGHT
+//     SHEEN_ROUGHNESS
+//     UNUSED
+//
+// Texture ordering:
+//     BASE_COLOUR
+//     NORMAL
+//     METALLIC
+//     ROUGHNESS
+//     OCCLUSION
+//     DISPLACEMENT
+//     UNUSED
+//     UNUSED
+//
+// @todo: implement loading!
+//
 
 #endif  // FILE_FORMATS_H_

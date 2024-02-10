@@ -1397,7 +1397,7 @@ void A_AnimationBoneMatricesGet(Mat4x4F *output_matrices, A_Skeleton *skeleton, 
             output_matrices[it] = A_SampleToM4x4F(&samples[it]);
         }
         else {
-            assert(bone->parent_index < it);
+            Assert(bone->parent_index < it);
 
             Mat4x4F transform   = A_SampleToM4x4F(&samples[it]);
             output_matrices[it] = M4x4FMul(output_matrices[bone->parent_index], transform);
