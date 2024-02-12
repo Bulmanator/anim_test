@@ -11,6 +11,10 @@
 #include <SDL2/SDL_vulkan.h>
 #include <SDL2/SDL_syswm.h>
 
+#define STBI_ONLY_PNG 1
+#define STB_IMAGE_IMPLEMENTATION 1
+#include <stb_image.h>
+
 #define CORE_IMPL 1
 #include "core.h"
 
@@ -22,6 +26,8 @@
 #include "render.h"
 
 static void *zmalloc(size_t size) {
+    // @todo: remove this, I think the only thing that still uses this is vulkan device allocation
+    //
     void *result = malloc(size);
     memset(result, 0, size);
 
@@ -31,199 +37,12 @@ static void *zmalloc(size_t size) {
 #include "vulkan.h"
 #include "vulkan.cpp"
 
-
-// Animation file data
-//
-
-#pragma pack(push, 1)
-
-// Mesh file
-//
-
-// 24 bytes
-//
-struct Vertex3 {
-    Vec3F position;
-    U16   uv[2];
-    U8    normal[4];
-
-    // this doesn't really need to be a U32 but the struct will likely be
-    // padded anyway because 22 bytes is a weird size (i.e. for a U16)
-    //
-    U32 material_index;
-};
-
-// 32 bytes
-//
-// U8 bone weights seem fine at the moment, however, the test mesh is a robot which is designed to be
-// rigid so probably want to test on something which would have more compression etc.
-//
-struct SkinnedVertex3 {
-    union {
-        struct {
-            Vec3F position;
-            U16   uv[2];
-            U8    normal[4];
-
-            U32 material_index;
-        };
-
-        Vertex3 vertex;
-    };
-
-    U8 bone_indices[4];
-    U8 bone_weights[4];
-};
-
-struct A_Material {
-    Vec4F base_colour;
-    F32 roughness;
-    F32 metallic;
-    F32 ior;
-
-    F32 anisotropic;
-    F32 anisotropic_rotation;
-
-    F32 clear_coat;
-    F32 clear_coat_roughness;
-
-    F32 sheen;
-    F32 sheen_roughness;
-
-    Str8 name;
-};
-
-struct A_Mesh {
-    B32 has_bones;
-
-    Str8 string_table;
-
-    U32 num_vertices;
-
-    U32 num_indices;
-    U16 *indices;
-
-    union {
-        Vertex3 *vertices;
-        SkinnedVertex3 *skinned_vertices;
-    };
-
-    U32 num_materials;
-    A_Material *materials;
-};
-
-#pragma pack(pop)
-
-#if 0
-static B32 MeshFileLoad(A_Mesh *mesh, const char *path) {
-    B32 result = false;
-
-    FILE *f = fopen(path, "rb");
-    if (f) {
-        fread(&mesh->has_bones,    sizeof(B8),  1, f);
-        fread(&mesh->num_faces,    sizeof(U16), 1, f);
-        fread(&mesh->num_vertices, sizeof(U16), 1, f);
-
-        U64 idx_size = sizeof(U16) * 3 * mesh->num_faces;
-        U64 vtx_size = mesh->num_vertices * (mesh->has_bones ? sizeof(SkinnedVertex3) : sizeof(Vertex3));
-
-        mesh->indices  = (U16 *) zmalloc(idx_size);
-        mesh->vertices = (Vertex3 *) zmalloc(vtx_size); // while cast to Vertex3 still valid for skinned_vertices because of union
-
-        fread(mesh->indices,  idx_size, 1, f);
-        fread(mesh->vertices, vtx_size, 1, f);
-
-        fclose(f);
-
-        result = true;
-    }
-
-    return result;
-}
-#else
-
-#pragma pack(push, 1)
-
-// @todo: this is very incomplete, need to think more seriously about the layout of the mesh file!
-//
-
-#define AMTM_MAGIC   FourCC('A', 'M', 'T', 'M')
-#define AMTM_VERSION 1
-
-struct AMTM_Header {
-    U32 magic;
-    U32 version;
-
-    U32 flags;
-
-    U32 num_meshes;
-    U32 num_vertices;
-    U32 num_indices;
-
-    U32 num_materials;
-    U32 num_textures;
-
-    U32 string_table_count;
-
-    U32 pad[7];
-};
-
-StaticAssert(sizeof(AMTM_Header) == 64);
-
-struct AMTM_Vertex {
-    F32 position[3];
-    F32 uv[2];
-    F32 normal[3];
-
-    U32 material_index;
-};
-
-struct AMTM_SkinnedVertex {
-    union {
-        struct {
-            F32 position[3];
-            F32 uv[2];
-            F32 normal[3];
-
-            U32 material_index;
-        };
-
-        AMTM_Vertex vertex;
-    };
-
-    U8  bone_indices[4];
-    F32 bone_weights[4];
-};
-
-struct AMTM_Material {
-    Vec4F colour;
-
-    F32 roughness;
-    F32 metallic;
-    F32 ior;
-
-    F32 anisotropic;
-    F32 anisotropic_rotation;
-
-    F32 clear_coat;
-    F32 clear_coat_roughness;
-
-    F32 sheen;
-    F32 sheen_roughness;
-
-    U16 name_count;
-    U16 name_offset;
-};
-
-#pragma pack(pop, 1)
-
-#if 1
 Function B32 MeshFileLoad(Arena *arena, A_Mesh *mesh, Str8 path) {
     B32 result = false;
 
-    TempArena temp = TempGet(0, 0);
-    char *zpath    = ArenaPush(temp.arena, char, path.count + 1);
+    TempArena temp = TempGet(1, &arena);
 
+    char *zpath = ArenaPush(temp.arena, char, path.count + 1);
     memcpy(zpath, path.data, path.count);
 
     FILE *handle = fopen(zpath, "rb");
@@ -234,286 +53,199 @@ Function B32 MeshFileLoad(Arena *arena, A_Mesh *mesh, Str8 path) {
         data.count = ftell(handle);
         fseek(handle, 0, SEEK_SET);
 
-        data.data = ArenaPush(temp.arena, U8, data.count);
+        data.data = ArenaPush(temp.arena, U8, data.count, ARENA_FLAG_NO_ZERO);
 
         fread(data.data, data.count, 1, handle);
         fclose(handle);
 
-        AMTM_Header *header = cast(AMTM_Header *) data.data;
+        AMTM_Mesh amtm = { 0 };
+        AMTM_MeshFromData(temp.arena, &amtm, data);
 
-        if (header->magic != AMTM_MAGIC) {
-            printf("[ERR] :: Not a AMTM file\n");
-            return result;
-        }
-
-        if (header->version != AMTM_VERSION) {
-            printf("[ERR] :: Unknown AMTM file version\n");
-            return result;
-        }
-
-        // @incomplete: rough file layout for mesh
+        // Copy the string table
         //
-        // Header
-        // String Table
-        // Mesh
-        // Materials
-        // Vertices
-        // Indices
+        mesh->string_table.count = amtm.string_table.count;
+        mesh->string_table.data  = ArenaPushCopy(arena, amtm.string_table.data, U8, mesh->string_table.count);
+
+        mesh->num_textures  = amtm.num_textures;
+        mesh->num_submeshes = amtm.num_submeshes;
+        mesh->num_materials = amtm.num_materials;
+
+        // Gather submesh information
         //
-
-        // Setup the string table
+        // @todo: for now this just makes a copy of the vertex data and index data and stores it on the
+        // submesh, we should pass in a staging buffer and upload this stuff directly!
         //
-        Str8 string_table;
-        string_table.count = header->string_table_count;
-        string_table.data  = cast(U8 *) (header + 1);
+        mesh->submeshes = ArenaPush(arena, A_Submesh, mesh->num_submeshes);
 
-        mesh->string_table.count = string_table.count;
-        mesh->string_table.data  = ArenaPushCopy(arena, string_table.data, U8, string_table.count);
-
-        // @incomplete: load dummy mesh, as we don't split on export there is only one and its kinda
-        // useless to us
+        // running totals for base offsets
         //
-        // so skip past it for now
-        //
-        U64 mesh_offset = 12;
+        U32 total_vertices  = 0;
+        U32 total_indices   = 0;
 
-        // Load material info
-        //
-        mesh->num_materials = header->num_materials;
-        mesh->materials     = ArenaPush(arena, A_Material, mesh->num_materials);
+        for (U32 it = 0; it < mesh->num_submeshes; ++it) {
+            A_Submesh    *dst = &mesh->submeshes[it];
+            AMTM_Submesh *src = &amtm.submeshes[it];
 
-        AMTM_Material *material = cast(AMTM_Material *) (string_table.data + string_table.count + mesh_offset);
-        for (U32 it = 0; it < mesh->num_materials; ++it) {
-            A_Material *dst = &mesh->materials[it];
+            dst->name.count = src->info->name_count;
+            dst->name.data  = &mesh->string_table.data[src->info->name_offset];
 
-            dst->base_colour = material->colour;
+            dst->flags = src->info->flags;
 
-            dst->roughness = material->roughness;
-            dst->metallic  = material->metallic;
-            dst->ior       = material->ior;
+            dst->base_vertex = total_vertices;
+            dst->base_index  = total_indices;
 
-            dst->anisotropic          = material->anisotropic;
-            dst->anisotropic_rotation = material->anisotropic_rotation;
+            dst->num_vertices = src->info->num_vertices;
+            dst->num_indices  = src->info->num_indices;
 
-            dst->clear_coat           = material->clear_coat;
-            dst->clear_coat_roughness = material->clear_coat_roughness;
+            dst->indices = ArenaPushCopy(arena, src->indices, U16, dst->num_indices);
 
-            dst->sheen           = material->sheen;
-            dst->sheen_roughness = material->sheen_roughness;
-
-            dst->name.count = material->name_count;
-            dst->name.data  = &mesh->string_table.data[material->name_offset];
-
-            material++;
-        }
-
-        // Load vertex and index data
-        //
-        mesh->num_vertices = header->num_vertices;
-        mesh->num_indices  = header->num_indices;
-
-        mesh->has_bones = (header->flags & 0x1) != 0;
-
-        U16 *indices = 0;
-
-        if (mesh->has_bones) {
-            mesh->skinned_vertices = ArenaPush(arena, SkinnedVertex3, mesh->num_vertices);
-
-            // material has now iterated over all of the material info so now points to the beginning
-            // of the vertex array
+            // @todo: come up with a more coherent way to copy the vertices, R_SkinnedVertex3 is a the
+            // same as R_Vertex3 but with extra data, this method can be error-prone in the event
+            // the vertex layout changes
             //
-            AMTM_SkinnedVertex *vertices = cast(AMTM_SkinnedVertex *) material;
+            if (dst->flags & AMTM_MESH_FLAG_IS_SKINNED) {
+                R_SkinnedVertex3   *to_vertices   = ArenaPush(arena, R_SkinnedVertex3, dst->num_vertices);
+                AMTM_SkinnedVertex *from_vertices = src->skinned_vertices;
 
-            for (U32 it = 0; it < mesh->num_vertices; ++it) {
-                AMTM_SkinnedVertex *src = &vertices[it];
-                SkinnedVertex3     *dst = &mesh->skinned_vertices[it];
+                for (U32 v = 0; v < dst->num_vertices; ++v) {
+                    R_SkinnedVertex3   *to   = &to_vertices[v];
+                    AMTM_SkinnedVertex *from = &from_vertices[v];
 
-                dst->position.x = src->position[0];
-                dst->position.y = src->position[1];
-                dst->position.z = src->position[2];
+                    to->position.x = from->position[0];
+                    to->position.y = from->position[1];
+                    to->position.z = from->position[2];
 
-                dst->uv[0] = cast(U16) (src->uv[0] * U16_MAX);
-                dst->uv[1] = cast(U16) (src->uv[1] * U16_MAX);
+                    to->uv[0] = cast(U16) (U16_MAX * from->uv[0]);
+                    to->uv[1] = cast(U16) (U16_MAX * from->uv[1]);
 
-                dst->normal[0] = cast(U8) ((src->normal[0] * 127.0f) + 127.5f);
-                dst->normal[1] = cast(U8) ((src->normal[1] * 127.0f) + 127.5f);
-                dst->normal[2] = cast(U8) ((src->normal[2] * 127.0f) + 127.5f);
-                dst->normal[3] = 254; // 1.0 unused in shader, here for padding
+                    to->normal[0] = cast(U8) ((from->normal[0] * 127.0f) + 127.5f);
+                    to->normal[1] = cast(U8) ((from->normal[1] * 127.0f) + 127.5f);
+                    to->normal[2] = cast(U8) ((from->normal[2] * 127.0f) + 127.5f);
+                    to->normal[3] = 254; // 1.0, unused in shader only for padding
 
-                dst->material_index = src->material_index;
+                    // @todo: when we start loading multiple meshes materials will be compacted into a
+                    // single buffer on the gpu, this means the material_index will have to be re-based to
+                    // the current offset in that buffer
+                    //
+                    // :material_base
+                    //
+                    to->material_index = from->material_index;
 
-                dst->bone_indices[0] = src->bone_indices[0];
-                dst->bone_indices[1] = src->bone_indices[1];
-                dst->bone_indices[2] = src->bone_indices[2];
-                dst->bone_indices[3] = src->bone_indices[3];
+                    to->bone_indices[0] = from->bone_indices[0];
+                    to->bone_indices[1] = from->bone_indices[1];
+                    to->bone_indices[2] = from->bone_indices[2];
+                    to->bone_indices[3] = from->bone_indices[3];
 
-                dst->bone_weights[0] = cast(U8) (src->bone_weights[0] * U8_MAX);
-                dst->bone_weights[1] = cast(U8) (src->bone_weights[1] * U8_MAX);
-                dst->bone_weights[2] = cast(U8) (src->bone_weights[2] * U8_MAX);
-                dst->bone_weights[3] = cast(U8) (src->bone_weights[3] * U8_MAX);
+                    to->bone_weights[0] = cast(U8) (U8_MAX * from->bone_weights[0]);
+                    to->bone_weights[1] = cast(U8) (U8_MAX * from->bone_weights[1]);
+                    to->bone_weights[2] = cast(U8) (U8_MAX * from->bone_weights[2]);
+                    to->bone_weights[3] = cast(U8) (U8_MAX * from->bone_weights[3]);
+                }
 
-                // doubt this is gonna work
-                U32 sum = dst->bone_weights[0] + dst->bone_weights[1] + dst->bone_weights[2] + dst->bone_weights[3];
-                Assert(sum <= 255);
+                dst->vertices = cast(void *) to_vertices;
+            }
+            else {
+                R_Vertex3   *to_vertices   = ArenaPush(arena, R_Vertex3, dst->num_vertices);
+                AMTM_Vertex *from_vertices = src->vertices;
+
+                for (U32 v = 0; v < dst->num_vertices; ++v) {
+                    R_Vertex3   *to   = &to_vertices[v];
+                    AMTM_Vertex *from = &from_vertices[v];
+
+                    to->position.x = from->position[0];
+                    to->position.y = from->position[1];
+                    to->position.z = from->position[2];
+
+                    to->uv[0] = cast(U16) (U16_MAX * from->uv[0]);
+                    to->uv[1] = cast(U16) (U16_MAX * from->uv[1]);
+
+                    to->normal[0] = cast(U8) ((from->normal[0] * 127.0f) + 127.5f);
+                    to->normal[1] = cast(U8) ((from->normal[1] * 127.0f) + 127.5f);
+                    to->normal[2] = cast(U8) ((from->normal[2] * 127.0f) + 127.5f);
+                    to->normal[3] = 254; // 1.0, unused in shader only for padding
+
+                    // :material_base
+                    //
+                    to->material_index = from->material_index;
+                }
+
+                dst->vertices = cast(void *) to_vertices;
             }
 
-            indices = cast(U16 *) (vertices + mesh->num_vertices);
-        }
-        else {
-            mesh->vertices = ArenaPush(arena, Vertex3, mesh->num_vertices);
-            Assert(!"INCOMPLETE MUST BE SKINNED MESH");
+            total_vertices += dst->num_vertices;
+            total_indices  += dst->num_indices;
         }
 
-        Assert(indices != 0);
-
-        mesh->indices = ArenaPushCopy(arena, indices, U16, mesh->num_indices);
-
-        // @incomplete: not loading textures either!!!!
+        // Gather material data
         //
+        mesh->materials = ArenaPush(arena, A_Material, mesh->num_materials);
 
-        result = true;
-    }
+        for (U32 it = 0; it < mesh->num_materials; ++it) {
+            A_Material    *dst = &mesh->materials[it];
+            AMTM_Material *src = &amtm.materials[it];
 
-    return result;
-}
-#else
+            dst->colour = src->colour;
 
-static B32 MeshFileLoad(A_Mesh *mesh, const char *path) {
-    B32 result = false;
+            dst->roughness = src->properties[AMTM_MATERIAL_PROPERTY_TYPE_ROUGHNESS];
+            dst->metallic  = src->properties[AMTM_MATERIAL_PROPERTY_TYPE_METALLIC];
+            dst->ior       = src->properties[AMTM_MATERIAL_PROPERTY_TYPE_IOR];
 
-    FILE *f = fopen(path, "rb");
-    if (f) {
-        U32 magic, version;
-        fread(&magic,   sizeof(U32), 1, f);
-        fread(&version, sizeof(U32), 1, f);
+            dst->anisotropic          = src->properties[AMTM_MATERIAL_PROPERTY_TYPE_ANISOTROPIC];
+            dst->anisotropic_rotation = src->properties[AMTM_MATERIAL_PROPERTY_TYPE_ANISOTROPIC_ROTATION];
 
-        if (magic != 0x4D544D41) {
-            printf("[ERR] :: Not an AMTM file\n");
-            return result;
+            dst->clear_coat           = src->properties[AMTM_MATERIAL_PROPERTY_TYPE_COAT_WEIGHT];
+            dst->clear_coat_roughness = src->properties[AMTM_MATERIAL_PROPERTY_TYPE_COAT_ROUGHNESS];
+
+            dst->sheen           = src->properties[AMTM_MATERIAL_PROPERTY_TYPE_SHEEN_WEIGHT];
+            dst->sheen_roughness = src->properties[AMTM_MATERIAL_PROPERTY_TYPE_SHEEN_ROUGHNESS];
+
+            U32 texture = src->textures[AMTM_MATERIAL_TEXTURE_TYPE_BASE_COLOUR];
+            Assert(texture != U32_MAX); // unused if this is the case, we require base colour texture
+
+            U32 channels = texture >> AMTM_TEXTURE_CHANNELS_SHIFT;
+            U32 index    = texture &  AMTM_TEXTURE_INDEX_MASK;
+
+            Assert(channels == 0xF); // all RGBA channels used
+
+            dst->albedo_index = index;
         }
 
-        if (version != 1) {
-            printf("[ERR] :: Unsupported file version\n");
-            return result;
-        }
+        // Gather texture data
+        //
+        // :note we do actually load all textures even though only base colour is used, testing!
+        //
+        mesh->textures = ArenaPush(arena, A_Texture, mesh->num_textures);
 
-        U32 flags, num_meshes, total_vertices, total_indices;
-        U32 num_materials, num_textures, string_table_count;
+        for (U32 it = 0; it < mesh->num_textures; ++it) {
+            A_Texture    *dst = &mesh->textures[it];
+            AMTM_Texture *src = &amtm.textures[it];
 
-        fread(&flags,              sizeof(U32), 1, f);
-        fread(&num_meshes,         sizeof(U32), 1, f);
-        fread(&total_vertices,     sizeof(U32), 1, f);
-        fread(&total_indices,      sizeof(U32), 1, f);
-        fread(&num_materials,      sizeof(U32), 1, f);
-        fread(&num_textures,       sizeof(U32), 1, f);
-        fread(&string_table_count, sizeof(U32), 1, f);
+            Str8 name;
+            name.count = src->name_count;
+            name.data  = &mesh->string_table.data[src->name_offset];
 
-        fseek(f, 7 * sizeof(U32), SEEK_CUR); // past pad
+            dst->name = name;
 
-        printf("Header {\n");
-        printf("  - flags              = 0x%x\n", flags);
-        printf("  - num_meshes         = %d\n", num_meshes);
-        printf("  - total_vertices     = %d\n", total_vertices);
-        printf("  - total_indices      = %d\n", total_indices);
-        printf("  - num_materials      = %d\n", num_materials);
-        printf("  - num_textures       = %d\n", num_textures);
-        printf("  - string_table_count = %d\n", string_table_count);
-        printf("}\n");
+            char image_path[1024];
+            snprintf(image_path, sizeof(image_path), "textures/%.*s.png", cast(U32) name.count, name.data);
 
-        if (num_meshes != 1) {
-            // @incomplete: the exporter doesn't handle multiple/split large meshes yet
+            // load the image data
             //
-            printf("[ERR] :: Only single mesh files are currently supported\n");
-            return result;
+            int w, h, c;
+            U8 *pixels = stbi_load(image_path, &w, &h, &c, 4);
+
+            Assert(pixels != 0);
+
+            dst->width  = w;
+            dst->height = h;
+            dst->pixels = pixels;
         }
-
-        mesh->string_table.count = string_table_count;
-        mesh->string_table.data  = (U8 *) malloc(string_table_count);
-
-        fread(mesh->string_table.data, mesh->string_table.count, 1, f);
-
-        mesh->num_materials = num_materials;
-        mesh->materials     = (A_Material *) zmalloc(num_materials * sizeof(A_Material));
-
-        U32 base_vertex;
-        U32 base_index;
-        U32 num_indices;
-
-        fread(&base_vertex, sizeof(U32), 1, f);
-        fread(&base_index,  sizeof(U32), 1, f);
-        printf("base vertex = %d, base index = %d\n", base_vertex, base_index);
-        fread(&num_indices, sizeof(U32), 1, f);
-
-        if (num_indices != total_indices) {
-            printf("[ERR] :: Indices count mismatch (%d wanted, %d got)\n", total_indices, num_indices);
-            return result;
-        }
-
-        for (U32 it = 0; it < num_materials; ++it) {
-            A_Material *material = &mesh->materials[it];
-
-            fread(&material->base_colour,          sizeof(Vec4F), 1, f);
-            fread(&material->roughness,            sizeof(F32),   1, f);
-            fread(&material->metallic,             sizeof(F32),   1, f);
-            fread(&material->ior,                  sizeof(F32),   1, f);
-            fread(&material->anisotropic,          sizeof(F32),   1, f);
-            fread(&material->anisotropic_rotation, sizeof(F32),   1, f);
-            fread(&material->clear_coat,           sizeof(F32),   1, f);
-            fread(&material->clear_coat_roughness, sizeof(F32),   1, f);
-            fread(&material->sheen,                sizeof(F32),   1, f);
-            fread(&material->sheen_roughness,      sizeof(F32),   1, f);
-
-            U16 offset, count;
-            fread(&count,  sizeof(U16), 1, f);
-            fread(&offset, sizeof(U16), 1, f);
-
-            material->name.count = count;
-            material->name.data  = &mesh->string_table.data[offset];
-
-            printf("Material[%d] = %.*s\n", it, (U32) material->name.count, material->name.data);
-        }
-
-        // @incomplete: exporter currently doesn't write texture data out!
-        //
-        // :texture_data
-        //
-        assert(num_textures == 0);
-
-        U32 vtx_size;
-        if (flags & 0x1) { // HAS_SKELETON
-            vtx_size = sizeof(SkinnedVertex3);
-        }
-        else {
-            vtx_size = sizeof(Vertex3);
-        }
-
-        mesh->num_vertices = total_vertices;
-        mesh->vertices     = (Vertex3 *) malloc(total_vertices * vtx_size);
-
-        printf("Reading %d bytes (%d * %d)\n", total_vertices * vtx_size, vtx_size, total_vertices);
-
-        fread(mesh->vertices, vtx_size, total_vertices, f);
-
-        for (U32 it = 0; it < 25; ++it) {
-            printf("Vertex[%d] = %d (%f)\n", it, mesh->vertices[it].material_index, *(F32 *) &mesh->vertices[it].material_index);
-        }
-
-        mesh->num_indices = total_indices;
-        mesh->indices     = (U16 *) malloc(total_indices * sizeof(U16));
-
-        fread(mesh->indices, sizeof(U16), total_indices, f);
-
-        // :texture_data
-        //
 
         result = true;
-        fclose(f);
     }
 
     return result;
 }
-#endif
-#endif
 
 static B32 SkeletonFileLoad(Arena *arena, A_Skeleton *skeleton, Str8 path) {
     B32 result = false;
@@ -701,8 +433,8 @@ int main(int argc, char **argv) {
     //const char *mesh_path = "../test/mesh/ninja_female_01.mesh";
     //const char *skel_path = "../test/skeleton/ninja_female_01.anim";
 
-    const char *mesh_path = "../test/Characters_Mako.amtm";
-    const char *skel_path = "../test/Characters_Mako.amts";
+    const char *mesh_path = "../test/Mako/Characters_Mako.amtm";
+    const char *skel_path = "../test/Mako/Characters_Mako.amts";
 #endif
 
     // reserve a 64 gib arena
@@ -719,10 +451,6 @@ int main(int argc, char **argv) {
             printf("[error] :: failed to load mesh\n");
             return 1;
         }
-
-        printf("Mesh info:\n");
-        printf("   - %d indices\n",  mesh.num_indices);
-        printf("   - %d vertices\n", mesh.num_vertices);
     }
 
     A_Skeleton skeleton = {};
@@ -850,22 +578,27 @@ int main(int argc, char **argv) {
     //
 
     VK_Buffer vb = {};
-    vb.size        = mesh.num_vertices * sizeof(SkinnedVertex3);
+    vb.size        = MB(64);
     vb.host_mapped = true;
     vb.usage       = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
 
-    VK_BufferCreate(device, &vb);
-
-    memcpy(vb.data, mesh.skinned_vertices, mesh.num_vertices * sizeof(SkinnedVertex3));
-
     VK_Buffer ib = {};
-    ib.size        = mesh.num_indices * sizeof(U16);
+    ib.size        = MB(64);
     ib.host_mapped = true;
     ib.usage       = VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
 
+    VK_BufferCreate(device, &vb);
     VK_BufferCreate(device, &ib);
 
-    memcpy(ib.data, mesh.indices, mesh.num_indices * sizeof(U16));
+    {
+        // Only copy first submesh for now
+        //
+        A_Submesh *submesh = &mesh.submeshes[0];
+        Assert(submesh->flags & AMTM_MESH_FLAG_IS_SKINNED);
+
+        memcpy(vb.data, submesh->vertices, submesh->num_vertices * sizeof(R_SkinnedVertex3));
+        memcpy(ib.data, submesh->indices,  submesh->num_indices  * sizeof(U16));
+    }
 
     VK_Buffer bb = {};
     bb.size        = skeleton.num_bones * sizeof(Mat4x4F);
@@ -875,30 +608,23 @@ int main(int argc, char **argv) {
     VK_BufferCreate(device, &bb);
 
     VK_Buffer mb = {};
-    mb.size        = mesh.num_materials * (sizeof(A_Material) - 16); // don't want string name @hack:!!!!
+    mb.size        = mesh.num_materials * sizeof(R_Material);
     mb.host_mapped = true;
     mb.usage       = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
 
     VK_BufferCreate(device, &mb);
 
     {
-        // @hack: fix this to be less hacky, we take of the string name from the entire material size,
-        // we should just have a material type for rendering specifically which only has the parameters
-        // we need. some of the material properties will come from textures so don't need to be stored in the
-        // material, but instead a texture index needs to be there for lookup. we need to sort out bindless
-        // textures for that
-        //
-        U64 stride = sizeof(A_Material);
-        U64 material_size = stride - 16;
-
-        U8 *from = (U8 *) mesh.materials;
-        U8 *to   = (U8 *) mb.data;
+        R_Material *materials = cast(R_Material *) mb.data;
 
         for (U32 it = 0; it < mesh.num_materials; ++it) {
-            memcpy(to, from, material_size);
+            R_Material *dst = &materials[it];
+            A_Material *src = &mesh.materials[it];
 
-            from += stride;
-            to   += material_size;
+            dst->colour    = src->colour;
+            dst->metallic  = src->metallic;
+            dst->roughness = src->roughness;
+            dst->ior       = src->ior;
         }
     }
 
@@ -1212,7 +938,11 @@ int main(int argc, char **argv) {
         vk->CmdPushConstants(cmds, pipeline.layout.pipeline,
                 VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(R_Setup), &setup);
 
-        vk->CmdDrawIndexed(cmds, mesh.num_indices, 1, 0, 0, 0);
+        {
+            A_Submesh *submesh = &mesh.submeshes[0];
+
+            vk->CmdDrawIndexed(cmds, submesh->num_indices, 1, 0, 0, 0);
+        }
 
         // end rendering
         //

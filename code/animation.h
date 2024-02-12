@@ -51,4 +51,69 @@ Function A_Sample *A_AnimationSamplesForFrame(A_Animation *animation, U32 num_bo
 Function void A_AnimationEvaluate(A_Sample *output_samples, A_Skeleton *skeleton, U32 animation_index, F32 dt);
 Function void A_AnimationBoneMatricesGet(Mat4x4F *output_matrices, A_Skeleton *skeleton, A_Sample *samples);
 
+// Mesh file
+//
+struct A_Material {
+    Str8 name;
+
+    U32 colour;
+
+    F32 roughness;
+    F32 metallic;
+    F32 ior;
+
+    // Other properties not currently used, just here to make sure we are loading correctly
+    //
+    F32 anisotropic;
+    F32 anisotropic_rotation;
+
+    F32 clear_coat;
+    F32 clear_coat_roughness;
+
+    F32 sheen;
+    F32 sheen_roughness;
+
+    // This is the only texture we use at the moment
+    //
+    U32 albedo_index;
+};
+
+struct A_Submesh {
+    Str8 name;
+
+    U32 flags; // skinned or not?
+
+    // used for drawing
+    //
+    U32 base_vertex;
+    U32 base_index;
+    U32 num_indices;
+
+    U32 num_vertices; // we only really need to know this for the length of the array below
+
+    void *vertices;
+    void *indices;
+};
+
+struct A_Texture {
+    Str8 name;
+
+    U32 width;
+    U32 height;
+
+    void *pixels;
+};
+
+struct A_Mesh {
+    Str8 string_table;
+
+    U32 num_submeshes;
+    U32 num_materials;
+    U32 num_textures;
+
+    A_Submesh  *submeshes;
+    A_Material *materials;
+    A_Texture  *textures;
+};
+
 #endif  // ANIMATION_H_

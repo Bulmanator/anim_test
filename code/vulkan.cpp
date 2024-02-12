@@ -966,6 +966,8 @@ struct VK_SpirvId {
     U32 type;
     U32 storage_class;
 
+    B32 sampled; // if true descriptor is a SAMPLED_IMAGE otherwise it is a STORAGE_IMAGE
+
     U32 set;
     U32 binding;
 };
@@ -984,14 +986,17 @@ Function VkShaderStageFlags VK_SpvExecutionModelToShaderStage(U32 model) {
     return result;
 }
 
-Function VkDescriptorType VK_SpvOpTypeToDescriptorType(U32 type) {
+Function VkDescriptorType VK_SpvOpTypeToDescriptorType(U32 type, B32 sampled) {
     VkDescriptorType result = cast(VkDescriptorType) 0;
 
     switch (type) {
         case SpvOpTypeStruct:       { result = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;         } break;
-        case SpvOpTypeImage:        { result = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;          } break;
         case SpvOpTypeSampler:      { result = VK_DESCRIPTOR_TYPE_SAMPLER;                } break;
         case SpvOpTypeSampledImage: { result = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER; } break;
+        case SpvOpTypeImage:        {
+            result = sampled ? VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+        }
+        break;
     }
 
     return result;
@@ -1065,12 +1070,30 @@ Function void VK_ShaderSourceParse(VK_Shader *shader, Str8 spv) {
             }
             break;
             case SpvOpTypeStruct:
-            case SpvOpTypeImage:
             case SpvOpTypeSampler:
             case SpvOpTypeSampledImage: {
                 U32 target = at[1];
 
                 ids[target].op = op;
+            }
+            break;
+            case SpvOpTypeImage: {
+                // We need to look at the other fields of this instruction as it allows us to differentiate
+                // between a declaration of an "image*" or a "texture*" if it is an image then
+                // VK_DESCRIPTOR_TYPE_STORAGE_IMAGE should be used and if it is a texture
+                // then VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE should be used
+                //
+                U32 target  = at[1];
+                U32 sampled = at[7];
+
+                // sampled can be 0, 1 or 2. 1 means it is a sampled image, 2 means it is a storage image
+                // 0 means the shader compiler didn't know and the type is only known at runtime.
+                //
+                // I don't really know why 0 is allowed, if we encounter a 0 we error on the side of
+                // 'sampled image' because it is the more likely use case
+                //
+                ids[target].sampled = (sampled != 2);
+                ids[target].op      = op;
             }
             break;
         }
@@ -1100,7 +1123,7 @@ Function void VK_ShaderSourceParse(VK_Shader *shader, Str8 spv) {
                     Assert(pointer->op == SpvOpTypePointer);
 
                     shader->resource_mask |= (1 << id->binding);
-                    shader->resources[id->binding] = VK_SpvOpTypeToDescriptorType(type->op);
+                    shader->resources[id->binding] = VK_SpvOpTypeToDescriptorType(type->op, type->sampled);
                 }
                 break;
                 case SpvStorageClassPushConstant: {

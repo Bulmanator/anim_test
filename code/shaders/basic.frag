@@ -10,19 +10,10 @@ layout(location = 3) flat in uint material_index;
 layout(location = 0) out vec4 framebuffer;
 
 struct Material {
-    float r, g, b, a;
+    uint  base_colour;
     float roughness;
     float metallic;
     float ior;
-
-    float anisotropic;
-    float anisotropic_rotation;
-
-    float clear_coat;
-    float clear_coat_roughness;
-
-    float sheen;
-    float sheen_roughness;
 };
 
 layout(push_constant, scalar, row_major)
@@ -47,9 +38,9 @@ readonly buffer Materials {
 vec3 lightp = vec3(-8, -3, 5);
 
 void main() {
-    vec4 base_colour = vec4(materials[material_index].r, materials[material_index].g,
-            materials[material_index].b, materials[material_index].a);
+    Material material = materials[material_index];
 
+    vec4 base_colour = unpackUnorm4x8(material.base_colour);
     vec3 dir = normalize(lightp - frag_pos);
 
     vec3 view_dir      = normalize(setup.view_p - frag_pos);

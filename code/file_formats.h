@@ -248,7 +248,142 @@ Function void AMTS_SkeletonCopyFromData(Arena *arena, AMTS_Skeleton *skeleton, S
 //     UNUSED
 //     UNUSED
 //
-// @todo: implement loading!
-//
+
+#define AMTM_MAGIC   FourCC('A', 'M', 'T', 'M')
+#define AMTM_VERSION 1
+
+#define AMTM_TEXTURE_CHANNELS_SHIFT 24
+#define AMTM_TEXTURE_INDEX_MASK     0xFFFFFF
+
+typedef U32 AMTM_MaterialPropertyType;
+enum {
+    AMTM_MATERIAL_PROPERTY_TYPE_METALLIC = 0,
+    AMTM_MATERIAL_PROPERTY_TYPE_ROUGHNESS,
+    AMTM_MATERIAL_PROPERTY_TYPE_IOR,
+    AMTM_MATERIAL_PROPERTY_TYPE_ANISOTROPIC,
+    AMTM_MATERIAL_PROPERTY_TYPE_ANISOTROPIC_ROTATION,
+    AMTM_MATERIAL_PROPERTY_TYPE_COAT_WEIGHT,
+    AMTM_MATERIAL_PROPERTY_TYPE_COAT_ROUGHNESS,
+    AMTM_MATERIAL_PROPERTY_TYPE_SHEEN_WEIGHT,
+    AMTM_MATERIAL_PROPERTY_TYPE_SHEEN_ROUGHNESS
+};
+
+typedef U32 AMTM_MaterialTextureType;
+enum {
+    AMTM_MATERIAL_TEXTURE_TYPE_BASE_COLOUR = 0,
+    AMTM_MATERIAL_TEXTURE_TYPE_NORMAL,
+    AMTM_MATERIAL_TEXTURE_TYPE_METALLIC,
+    AMTM_MATERIAL_TEXTURE_TYPE_ROUGHNESS,
+    AMTM_MATERIAL_TEXTURE_TYPE_OCCLUSION,
+    AMTM_MATERIAL_TEXTURE_TYPE_DISPLACEMENT
+};
+
+typedef U32 AMTM_MeshFlags;
+enum {
+    AMTM_MESH_FLAG_IS_SKINNED = (1 << 0)
+};
+
+#pragma pack(push, 1)
+
+typedef struct AMTM_Header AMTM_Header;
+struct AMTM_Header {
+    U32 magic;
+    U32 version;
+
+    U32 num_meshes;
+
+    U32 num_materials;
+    U32 num_textures;
+
+    U32 string_table_count;
+
+    U32 pad[10];
+};
+
+StaticAssert(sizeof(AMTM_Header) == 64);
+
+typedef struct AMTM_Material AMTM_Material;
+struct AMTM_Material {
+    U16 name_offset;
+    U8  name_count;
+    U8  flags;
+
+    U32 colour;
+
+    F32 properties[10];
+    U32 textures[8];
+};
+
+typedef struct AMTM_Texture AMTM_Texture;
+struct AMTM_Texture {
+    U16 name_offset;
+    U16 name_count;
+
+    U16 flags;
+    U16 num_channels;
+};
+
+typedef struct AMTM_MeshInfo AMTM_MeshInfo;
+struct AMTM_MeshInfo {
+    U32 num_vertices;
+    U32 num_indices;
+
+    U8  flags;
+    U8  name_count;
+    U16 name_offset;
+};
+
+typedef struct AMTM_Vertex AMTM_Vertex;
+struct AMTM_Vertex {
+    F32 position[3];
+    F32 uv[2];
+    F32 normal[3];
+
+    U32 material_index;
+};
+
+typedef struct AMTM_SkinnedVertex AMTM_SkinnedVertex;
+struct AMTM_SkinnedVertex {
+    F32 position[3];
+    F32 uv[2];
+    F32 normal[3];
+
+    U32 material_index;
+
+    U8  bone_indices[4];
+    F32 bone_weights[4];
+};
+
+#pragma pack(pop)
+
+typedef struct AMTM_Submesh AMTM_Submesh;
+struct AMTM_Submesh {
+    AMTM_MeshInfo *info;
+
+    union {
+        AMTM_Vertex        *vertices;
+        AMTM_SkinnedVertex *skinned_vertices;
+    };
+
+    U16 *indices;
+};
+
+typedef struct AMTM_Mesh AMTM_Mesh;
+struct AMTM_Mesh {
+    U32 version;
+
+    Str8 string_table;
+
+    U32 num_materials;
+    U32 num_textures;
+    U32 num_submeshes;
+
+    AMTM_Material *materials;
+    AMTM_Texture  *textures;
+    AMTM_Submesh  *submeshes; // Allocated from arena
+};
+
+Function void AMTM_MeshFromData(Arena *arena, AMTM_Mesh *mesh, Str8 data);
+Function void AMTM_MeshCopyFromData(Arena *arena, AMTM_Mesh *mesh, Str8 data);
 
 #endif  // FILE_FORMATS_H_
