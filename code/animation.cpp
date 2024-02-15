@@ -433,8 +433,8 @@ int main(int argc, char **argv) {
     //const char *mesh_path = "../test/mesh/ninja_female_01.mesh";
     //const char *skel_path = "../test/skeleton/ninja_female_01.anim";
 
-    const char *mesh_path = "../test/Mako/Characters_Mako.amtm";
-    const char *skel_path = "../test/Mako/Characters_Mako.amts";
+    const char *mesh_path = "../test/Characters_Mako/Characters_Mako.amtm";
+    const char *skel_path = "../test/Characters_Mako/Characters_Mako.amts";
 #endif
 
     // reserve a 64 gib arena
@@ -591,13 +591,29 @@ int main(int argc, char **argv) {
     VK_BufferCreate(device, &ib);
 
     {
-        // Only copy first submesh for now
-        //
-        A_Submesh *submesh = &mesh.submeshes[0];
-        Assert(submesh->flags & AMTM_MESH_FLAG_IS_SKINNED);
+        R_SkinnedVertex3 *vertices = cast(R_SkinnedVertex3 *) vb.data;
+        U16 *indices = cast(U16 *) ib.data;
 
-        memcpy(vb.data, submesh->vertices, submesh->num_vertices * sizeof(R_SkinnedVertex3));
-        memcpy(ib.data, submesh->indices,  submesh->num_indices  * sizeof(U16));
+        U32 base_vertex = 0;
+        U32 base_index  = 0;
+
+        for (U32 it = 0; it < mesh.num_submeshes; ++it) {
+            A_Submesh *submesh = &mesh.submeshes[it];
+
+            if (!(submesh->flags & AMTM_MESH_FLAG_IS_SKINNED)) { continue; }
+
+            memcpy(vertices, submesh->vertices, submesh->num_vertices * sizeof(R_SkinnedVertex3));
+            memcpy(indices,  submesh->indices,  submesh->num_indices  * sizeof(U16));
+
+            vertices += submesh->num_vertices;
+            indices  += submesh->num_indices;
+
+            submesh->base_vertex = base_vertex;
+            submesh->base_index  = base_index;
+
+            base_vertex += submesh->num_vertices;
+            base_index  += submesh->num_indices;
+        }
     }
 
     VK_Buffer bb = {};
@@ -628,6 +644,32 @@ int main(int argc, char **argv) {
         }
     }
 
+    VkSampler sampler;
+    {
+        VkSamplerCreateInfo create_info = { 0 };
+        create_info.sType        = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+        create_info.magFilter    = VK_FILTER_LINEAR;
+        create_info.minFilter    = VK_FILTER_LINEAR;
+        create_info.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        create_info.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        create_info.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+
+        VK_CHECK(vk->CreateSampler(device->handle, &create_info, 0, &sampler));
+    }
+
+    VK_Image texture = {};
+    {
+        A_Texture *image = &mesh.textures[0];
+
+        texture.width       = image->width;
+        texture.height      = image->height;
+        texture.format      = VK_FORMAT_R8G8B8A8_SRGB;
+        texture.usage       = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        texture.aspect_mask = VK_IMAGE_ASPECT_COLOR_BIT;
+
+        VK_ImageCreate(device, &texture, image->pixels);
+    }
+
     B32 running = true;
 
     // camera @todo: make this a parameterized structure
@@ -645,6 +687,7 @@ int main(int argc, char **argv) {
     F32 delta_time = 0;
     F32 total_time = 0;
     U64 start = U64TicksGet();
+
 
     while (running) {
         SDL_Event e;
@@ -889,8 +932,14 @@ int main(int argc, char **argv) {
         }
 
         {
-            VkDescriptorBufferInfo buffer_infos[3] = {};
+            // @todo: use the parsed shader descriptor information to automatically fill this stuff out
+            //
 
+            VkDescriptorBufferInfo buffer_infos[3] = {};
+            VkDescriptorImageInfo  image_info[2]   = {}; // 0 sampler, 1 image
+
+            // Setup buffers
+            //
             buffer_infos[0].buffer = vb.handle;
             buffer_infos[0].offset = 0;
             buffer_infos[0].range  = VK_WHOLE_SIZE;
@@ -903,7 +952,16 @@ int main(int argc, char **argv) {
             buffer_infos[2].offset = 0;
             buffer_infos[2].range  = VK_WHOLE_SIZE;
 
-            VkWriteDescriptorSet writes[4] = {};
+            // Setup images
+            //
+            image_info[0].sampler = sampler;
+
+            // maybe should just hardcode VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL for imageLayout
+            //
+            image_info[1].imageView   = texture.view;
+            image_info[1].imageLayout = texture.layout;
+
+            VkWriteDescriptorSet writes[5] = {};
 
             writes[0].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             writes[0].dstSet          = set;
@@ -929,7 +987,23 @@ int main(int argc, char **argv) {
             writes[2].descriptorType  = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             writes[2].pBufferInfo     = &buffer_infos[2];
 
-            vk->UpdateDescriptorSets(device->handle, 3, writes, 0, 0);
+            writes[3].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[3].dstSet          = set;
+            writes[3].dstBinding      = 3;
+            writes[3].dstArrayElement = 0;
+            writes[3].descriptorCount = 1;
+            writes[3].descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLER;
+            writes[3].pImageInfo      = &image_info[0];
+
+            writes[4].sType           = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[4].dstSet          = set;
+            writes[4].dstBinding      = 4;
+            writes[4].dstArrayElement = 0;
+            writes[4].descriptorCount = 1;
+            writes[4].descriptorType  = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+            writes[4].pImageInfo      = &image_info[1];
+
+            vk->UpdateDescriptorSets(device->handle, ArraySize(writes), writes, 0, 0);
         }
 
         vk->CmdBindDescriptorSets(cmds, VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -939,9 +1013,12 @@ int main(int argc, char **argv) {
                 VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(R_Setup), &setup);
 
         {
-            A_Submesh *submesh = &mesh.submeshes[0];
+            for (U32 it = 0; it < mesh.num_submeshes; ++it) {
+                A_Submesh *submesh = &mesh.submeshes[it];
+                if (!(submesh->flags & AMTM_MESH_FLAG_IS_SKINNED)) { continue; }
 
-            vk->CmdDrawIndexed(cmds, submesh->num_indices, 1, 0, 0, 0);
+                vk->CmdDrawIndexed(cmds, submesh->num_indices, 1, submesh->base_index, submesh->base_vertex, 0);
+            }
         }
 
         // end rendering
@@ -953,8 +1030,8 @@ int main(int argc, char **argv) {
         // @todo: gather both of these transitions into a single dependency info, we can issue them together
         //
         image_barrier.srcStageMask  = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
-        image_barrier.dstStageMask  = VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT;
         image_barrier.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        image_barrier.dstStageMask  = VK_PIPELINE_STAGE_2_NONE;
         image_barrier.dstAccessMask = 0;
         image_barrier.oldLayout     = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         image_barrier.newLayout     = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;

@@ -10,6 +10,9 @@ bl_info = {
 
 # Imports
 
+import os
+import shutil
+
 import bpy
 import bmesh
 import struct
@@ -35,11 +38,6 @@ AXES = [
     ("X", "X", "", 1), ("-X", "-X", "", 2),
     ("Y", "Y", "", 3), ("-Y", "-Y", "", 4),
     ("Z", "Z", "", 5), ("-Z", "-Z", "", 6)
-]
-
-MATERIAL_PROPERTIES = [
-        "Base Color", "Metallic", "Roughness", "IOR", "Anisotropic", "Anisotropic Rotation",
-        "Coat Weight", "Coat Roughness", "Sheen Weight", "Sheen Roughness"
 ]
 
 TEXTURE_NAMES = { "Base Color" : 0, "Normal" : 1, "Metallic" : 2, "Roughness" : 3, "Occlusion" : 4, "Displacement" : 5 }
@@ -95,13 +93,12 @@ class A_Track:
 # Mesh storage classes
 
 class R_Vertex:
-    def __init__(self, position, uv, normal, material_index, joint_indices, joint_weights):
+    def __init__(self, position, uv, normal, material_index, bone_info):
         self.position       = position.freeze()
         self.uv             = uv.freeze()
         self.normal         = normal.freeze()
         self.material_index = material_index
-        self.joint_indices  = joint_indices
-        self.joint_weights  = joint_weights
+        self.bone_info      = bone_info
 
     def __eq__(self, other):
         if type(other) is type(self):
@@ -110,12 +107,14 @@ class R_Vertex:
         return False
 
     def __hash__(self):
-        return hash((self.position, self.uv, self.normal, self.material_index, \
-                sum(self.joint_indices), sum(self.joint_weights)))
+        # @todo: re-incorporate bone_info into this hash
+        #
+        return hash((self.position, self.uv, self.normal, self.material_index))
 
 class R_Texture:
-    def __init__(self, name, index, num_channels):
-        self.name         = name
+    def __init__(self, path, index, num_channels):
+        self.path         = path
+        self.name         = bpy.path.basename(path).split('.')[0]
 
         self.name_offset  = 0
         self.name_count   = 0
@@ -227,7 +226,7 @@ def MeshTriangulate(mesh):
 
     bm.free()
 
-def R_MeshJointWeightsNormalise(weights):
+def R_MeshBoneWeightsNormalise(weights):
     result = [0, 0, 0, 0]
 
     total = sum(weights)
@@ -237,13 +236,28 @@ def R_MeshJointWeightsNormalise(weights):
 
     return result
 
+def R_MeshBoneIndicesGet(bone_info):
+    result = [0, 0, 0, 0]
+    for i in range(0, min(len(bone_info), 4)):
+        result[i] = bone_info[i][1]
+
+    return result
+
+def R_MeshBoneWeightsGet(bone_info):
+    result = [0, 0, 0, 0]
+    for i in range(0, min(len(bone_info), 4)):
+        result[i] = bone_info[i][0]
+
+    result = R_MeshBoneWeightsNormalise(result)
+    return result
+
 def R_MaterialsWrite(file, materials):
     for material in materials.values():
         U16Write(file, material.name_offset)
         U8Write(file, material.name_count)
         U8Write(file, 0) # reserved flags
 
-        # @todo: I don't think this is in the right order
+        # @todo: I don't think this is in the right order, I think its in ABGR order
         U8Write(file, int(material.colour[0] * 255))
         U8Write(file, int(material.colour[1] * 255))
         U8Write(file, int(material.colour[2] * 255))
@@ -275,10 +289,12 @@ def R_MeshVerticesWrite(file_handle, vertices, has_skeleton):
         U32Write(file_handle, v.material_index)
 
         if has_skeleton:
-            weights = R_MeshJointWeightsNormalise(v.joint_weights)
+            # these will both be four elements long, weights will be normalised
+            indices = R_MeshBoneIndicesGet(v.bone_info)
+            weights = R_MeshBoneWeightsGet(v.bone_info)
 
-            for i in v.joint_indices:  U8Write(file_handle, i)
-            for w in weights:         F32Write(file_handle, w)
+            for i in indices: U8Write(file_handle, i)
+            for w in weights: F32Write(file_handle, w)
 
 def AxisMappingMatrixGet():
     return axis_conversion("-Y", "Z", bpy.context.scene.export_properties.forward_axis, bpy.context.scene.export_properties.up_axis).to_4x4()
@@ -342,7 +358,7 @@ def A_TracksGet(tracks, string_table, armature, axis_mapping_matrix):
         track = A_Track(0, name_count, name_offset, (end_frame - start_frame) + 1, samples)
         tracks.append(track)
 
-def A_SkeletonExport():
+def A_SkeletonExport(output_dir):
     armatures = ArmatureListGet()
     if len(armatures) == 0:
         return { 'CANCELLED' }
@@ -367,11 +383,13 @@ def A_SkeletonExport():
     A_TracksGet(tracks, string_table, armature, axis_mapping_matrix)
 
     # Pull the filename from the open .blend project so we can export under the same name
-    filename    = bpy.path.basename(bpy.data.filepath).split('.')[0] + ".amts"
-    output_path = bpy.context.scene.export_properties.output_dir + filename
-    file_handle = open(bpy.path.abspath(output_path), "wb")
+    filename = bpy.path.basename(bpy.data.filepath).split('.')[0]
+    if not filename: filename = "[unnamed]"
 
-    # Write header
+    file_handle = open(bpy.path.abspath(output_dir + os.sep + filename + ".amts"), "wb")
+
+    ### Header begin
+
     U32Write(file_handle, AMTS_MAGIC)
     U32Write(file_handle, AMTS_VERSION)
 
@@ -394,6 +412,8 @@ def A_SkeletonExport():
 
     # Pad the header to 64 bytes
     for i in range(0, 9): U32Write(file_handle, 0)
+
+    ### Header end
 
     # Write string table
     for s in string_table:
@@ -441,7 +461,7 @@ def R_LinkedTextureNodesFind(linked_nodes, node, channel_mask):
         else:
             R_LinkedTextureNodesFind(linked_nodes, link.to_node, new_mask)
 
-def R_MeshExport():
+def R_MeshExport(output_dir):
     mesh_list = MeshListGet()
     if len(mesh_list) == 0:
         return { 'CANCELLED' }
@@ -472,14 +492,18 @@ def R_MeshExport():
                 linked_nodes = []
                 R_LinkedTextureNodesFind(linked_nodes, node, 0xF)
                 if len(linked_nodes) > 0:
-                    name  = bpy.path.basename(bpy.path.abspath(node.image.filepath)).split('.')[0]
-                    index = 0
-                    if not name in textures:
-                        index = len(textures)
-                        textures[name] = R_Texture(name, index, node.image.channels)
-                    else:
-                        index = textures[name].index
+                    full_path    = bpy.path.abspath(node.image.filepath)
+                    texture_name = bpy.path.basename(full_path).split('.')[0]
 
+                    index = 0
+                    if not texture_name in textures:
+                        index = len(textures)
+                        textures[texture_name] = R_Texture(full_path, index, node.image.channels)
+                    else:
+                        index = textures[texture_name].index
+
+                    # @todo: maybe we shouldn't add the texture to the dict until we confirm
+                    # its actually a supported link
                     for link in linked_nodes:
                         if not link[0] in TEXTURE_NAMES: continue
 
@@ -526,11 +550,13 @@ def R_MeshExport():
                 normal   = loop.normal.copy()
                 uv       = mesh.uv_layers.active.data[loop.index].uv.copy()
 
-                if bpy.context.scene.export_properties.flip_uv_y:
+                if bpy.context.scene.export_properties.flip_uv:
                     uv.y = 1 - uv.y
 
-                bone_indices = [0, 0, 0, 0]
-                bone_weights = [0, 0, 0, 0]
+                # There may be more than four weights/bone indices in here, they are however sorted in
+                # descending order and only the four highest weight values are written out to the file
+                #
+                bone_data = []
 
                 # This checks that the vertex group which the vertex is apart of actually exists within
                 # the armature. This may not always be the case due to blender deciding that it would be
@@ -540,22 +566,18 @@ def R_MeshExport():
                 if armature:
                     bone_count = 0
                     for group in mesh.vertices[loop.vertex_index].groups:
-                        if bone_count < 4:
-                            group_index = group.group
-                            bone_name   = o.vertex_groups[group_index].name
-                            bone_index  = armature.data.bones.find(bone_name)
+                        group_index = group.group
+                        bone_name   = o.vertex_groups[group_index].name
+                        bone_index  = armature.data.bones.find(bone_name)
 
-                            if bone_index >= 0:
-                                bone_indices[bone_count] = bone_index
-                                bone_weights[bone_count] = group.weight
+                        if bone_index >= 0:
+                            bone_data.append((group.weight, bone_index))
 
-                                bone_count += 1
-                        else:
-                            # We only support skinning influences from up to 4 bones
-                            break
+                # Sort the bone weights in descending order
+                bone_data.sort(reverse = True)
 
                 # :note bone weights are normalised at a later time
-                vertex = R_Vertex(position, uv, normal, material_index, bone_indices, bone_weights)
+                vertex = R_Vertex(position, uv, normal, material_index, bone_data)
                 if not vertex in vertices:
                    vertices[vertex] = len(vertices)
 
@@ -567,9 +589,10 @@ def R_MeshExport():
 
         if armature: ArmaturePoseSet(armature, base_pose)
 
-    filename    = bpy.path.basename(bpy.data.filepath).split('.')[0] + ".amtm"
-    output_path = bpy.context.scene.export_properties.output_dir + filename
-    file_handle = open(bpy.path.abspath(output_path), "wb")
+    filename = bpy.path.basename(bpy.data.filepath).split('.')[0]
+    if not filename: filename = "[unnamed]"
+
+    file_handle = open(bpy.path.abspath(output_dir + os.sep + filename + ".amtm"), "wb")
 
     ### Header begin
 
@@ -644,23 +667,50 @@ def R_MeshExport():
 
         for i in mesh.indices: U16Write(file_handle, i)
 
+    # Copy all linked textures to output_dir/textures if there are any
+    #
+    if len(textures) > 0:
+        textures_dir = output_dir + os.sep + "textures" + os.sep
+        if not os.path.exists(textures_dir): os.mkdir(textures_dir)
+
+        for name, texture in textures.items():
+            to_path   = textures_dir + bpy.path.basename(texture.path)
+            from_path = texture.path
+
+            shutil.copyfile(from_path, to_path)
+
     return { 'FINISHED' }
 
 # Blender specific export classes
 
 class ExportProperties(bpy.types.PropertyGroup):
-    output_dir:   bpy.props.StringProperty(name = "Output Directory", subtype = 'DIR_PATH')
-    forward_axis: bpy.props.EnumProperty(name = "Forward Axis", items = AXES, default = "-Y")
-    up_axis:      bpy.props.EnumProperty(name = "Up Axis",      items = AXES, default =  "Z")
-    flip_uv_y:    bpy.props.BoolProperty(name = "Flip UV", default = True)
+    output_dir:   bpy.props.StringProperty(name = "Output", subtype = 'DIR_PATH')
+    forward_axis: bpy.props.EnumProperty(name = "Forward", items = AXES, default = "-Y")
+    up_axis:      bpy.props.EnumProperty(name = "Up", items = AXES, default = "Z")
+    flip_uv:      bpy.props.BoolProperty(name = "Flip Textures", default = True)
 
 class AmtExporter(bpy.types.Operator):
-    bl_idname = "object.amt_exporter"
+    bl_idname = "scene.amt_exporter"
     bl_label  = "Export"
 
     def execute(self, context):
-        R_MeshExport()
-        return A_SkeletonExport()
+        # We create a directory in the output location with the same name of the project that
+        # is currently open so we can collect all of the exported info in a single location
+        #
+        subdir_name = bpy.path.basename(bpy.data.filepath).split('.')[0]
+        if not subdir_name: subdir_name = "[unnamed]"
+
+        output_dir = bpy.path.abspath(context.scene.export_properties.output_dir) + os.sep + subdir_name
+
+        # Nothing was set for the output dir and the project has no name!
+        if output_dir == os.sep: return { 'CANCELLED' }
+
+        if not os.path.exists(output_dir): os.mkdir(output_dir)
+
+        R_MeshExport(output_dir)
+        A_SkeletonExport(output_dir)
+
+        return { 'FINISHED' }
 
 
 class ExportPanel(bpy.types.Panel):
@@ -668,14 +718,14 @@ class ExportPanel(bpy.types.Panel):
     bl_idname      = "OBJECT_PT_layout"
     bl_space_type  = "PROPERTIES"
     bl_region_type = "WINDOW"
-    bl_context     = "object"
+    bl_context     = "output"
 
     def draw(self, context):
         self.layout.prop(context.scene.export_properties, "output_dir")
         self.layout.prop(context.scene.export_properties, "forward_axis")
         self.layout.prop(context.scene.export_properties, "up_axis")
-        self.layout.prop(context.scene.export_properties, "flip_uv_y")
-        self.layout.operator("object.amt_exporter")
+        self.layout.prop(context.scene.export_properties, "flip_uv")
+        self.layout.operator("scene.amt_exporter")
 
 # Init and shutdown
 

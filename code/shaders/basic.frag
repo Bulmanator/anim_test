@@ -35,6 +35,9 @@ readonly buffer Materials {
     Material materials[];
 };
 
+layout(binding = 3) uniform sampler   u_sampler;
+layout(binding = 4) uniform texture2D u_texture;
+
 vec3 lightp = vec3(-8, -3, 5);
 
 void main() {
@@ -50,5 +53,5 @@ void main() {
     float diffuse  = max(dot(frag_normal, dir), 0.0);
     float specular = pow(max(dot(view_dir, reflected_dir), 0.0), 256);
 
-    framebuffer = (ambient + diffuse + specular) * base_colour;
+    framebuffer = (ambient + diffuse + specular) * texture(sampler2D(u_texture, u_sampler), frag_uv) * base_colour;
 }

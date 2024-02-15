@@ -19,6 +19,8 @@
 #define VK_IMAGE_COUNT     3 // number of images on the swapchain (triple buffer)
 #define VK_MAX_IMAGE_COUNT 8 // maximum number of images a swapchain can have
 
+#define VK_STAGING_BUFFER_SIZE MB(64)
+
 struct VK_Context;
 struct VK_Device;
 
@@ -59,6 +61,19 @@ struct VK_Frame {
     VK_Frame *next;
 };
 
+struct VK_Buffer {
+    VkBuffer handle;
+    VkDeviceMemory memory;
+
+    B32 host_mapped;
+    VkBufferUsageFlags usage;
+
+    U64   offset;
+    U64   size;
+    U64   alignment;
+    void *data;
+};
+
 struct VK_Device {
     VkDevice handle;
     VkPhysicalDevice physical;
@@ -73,6 +88,7 @@ struct VK_Device {
     VK_Queue graphics_queue;
 
     VkCommandPool scratch_cmd_pool; // for quick commands that only need to be submitted once
+    VK_Buffer staging_buffer;
 
     VK_Frame frames[VK_FRAME_COUNT];
     VK_Frame *frame;
@@ -153,6 +169,23 @@ struct VK_Swapchain {
     } depth;
 };
 
+struct VK_Image {
+    VkImage     handle;
+    VkImageView view;
+
+    VkDeviceMemory memory;
+
+    U32 width;
+    U32 height;
+
+    VkFormat format;
+
+    VkImageLayout     layout;
+    VkImageUsageFlags usage;
+
+    VkImageAspectFlags aspect_mask;
+};
+
 struct VK_PipelineState {
     VkPrimitiveTopology topology;
 
@@ -212,17 +245,6 @@ struct VK_Pipeline {
     } layout;
 };
 
-struct VK_Buffer {
-    VkBuffer handle;
-    VkDeviceMemory memory;
-
-    B32 host_mapped;
-    VkBufferUsageFlags usage;
-
-    U64   offset;
-    U64   size;
-    U64   alignment;
-    void *data;
-};
+Function void VK_BufferCreate(VK_Device *device, VK_Buffer *buffer);
 
 #endif  // ANIMATION_VULKAN_H_

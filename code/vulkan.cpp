@@ -189,7 +189,7 @@ static B32 VK_ContextInitialise(VK_Context *vk) {
         }
 
         vk->device = preferred ? preferred : fallback;
-        assert(vk->device != 0);
+        Assert(vk->device != 0);
 
         printf("[INFO] :: using device '%s'\n", vk->device->properties.deviceName);
     }
@@ -348,6 +348,19 @@ static B32 VK_ContextInitialise(VK_Context *vk) {
 
             VK_CHECK(vk->CreateFence(device->handle, &create_info, 0, &frame->fence));
         }
+    }
+
+    // Create a staging buffer for the device
+    // @temp: this isn't going to stay like this, it is very single-threaded!
+    //
+    {
+        VK_Buffer *buffer = &device->staging_buffer;
+
+        buffer->host_mapped = true;
+        buffer->usage       = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+        buffer->size        = VK_STAGING_BUFFER_SIZE;
+
+        VK_BufferCreate(device, buffer);
     }
 
     device->frame = &device->frames[0];
@@ -753,7 +766,7 @@ static VK_Frame *VK_NextFrameAcquire(VK_Device *device, VK_Swapchain *swapchain)
     return result;
 }
 
-static void VK_BufferCreate(VK_Device *device, VK_Buffer *buffer) {
+void VK_BufferCreate(VK_Device *device, VK_Buffer *buffer) {
     VK_Context *vk = device->vk;
 
     VkBufferCreateInfo create_info = {};
@@ -789,6 +802,135 @@ static void VK_BufferCreate(VK_Device *device, VK_Buffer *buffer) {
     VK_CHECK(vk->BindBufferMemory(device->handle, buffer->handle, buffer->memory, 0));
 
     if (buffer->host_mapped) { vk->MapMemory(device->handle, buffer->memory, 0, buffer->size, 0, &buffer->data); }
+}
+
+Function void VK_ImageCreate(VK_Device *device, VK_Image *image, void *data) {
+    VK_Context *vk = device->vk;
+
+    {
+        VkImageCreateInfo create_info = {};
+        create_info.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        create_info.imageType     = VK_IMAGE_TYPE_2D;
+        create_info.format        = image->format;
+        create_info.extent.width  = image->width;
+        create_info.extent.height = image->height;
+        create_info.extent.depth  = 1;
+        create_info.mipLevels     = 1;
+        create_info.arrayLayers   = 1;
+        create_info.samples       = VK_SAMPLE_COUNT_1_BIT;
+        create_info.tiling        = VK_IMAGE_TILING_OPTIMAL;
+        create_info.usage         = image->usage;
+
+        VK_CHECK(vk->CreateImage(device->handle, &create_info, 0, &image->handle));
+    }
+
+    // @todo: memory allocator!!!!!!
+    //
+    {
+        // only put images in device local memory
+        //
+        VkMemoryPropertyFlags memory_properties = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+
+        VkMemoryRequirements requirements;
+        vk->GetImageMemoryRequirements(device->handle, image->handle, &requirements);
+
+        VkMemoryAllocateInfo alloc_info = {};
+        alloc_info.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        alloc_info.allocationSize  = requirements.size;
+        alloc_info.memoryTypeIndex = VK_MemoryTypeIndexGet(device, requirements.memoryTypeBits, memory_properties);
+
+        VK_CHECK(vk->AllocateMemory(device->handle, &alloc_info, 0, &image->memory));
+        VK_CHECK(vk->BindImageMemory(device->handle, image->handle, image->memory, 0));
+
+        if (data != 0) {
+            // Copy data into staging buffer, if provided
+            //
+            VK_Buffer *staging_buffer = &device->staging_buffer;
+            memcpy(staging_buffer->data, data, requirements.size);
+
+            // Issue buffer -> image copy with layout transitions
+            //
+            // @todo: this currently assumes the image will be used within the fragment shader
+            // but that might not actually be the case, especially if we want to start using compute shaders
+            //
+            // undefined -> transfer dst optimal
+            //
+            VkImageMemoryBarrier2 image_barriers[2] = {};
+            image_barriers[0].sType         = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+            image_barriers[0].srcStageMask  = VK_PIPELINE_STAGE_2_NONE;
+            image_barriers[0].srcAccessMask = 0;
+            image_barriers[0].dstStageMask  = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+            image_barriers[0].dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            image_barriers[0].oldLayout     = image->layout;
+            image_barriers[0].newLayout     = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            image_barriers[0].image         = image->handle;
+
+            image_barriers[0].subresourceRange.aspectMask = image->aspect_mask;
+            image_barriers[0].subresourceRange.levelCount = 1;
+            image_barriers[0].subresourceRange.layerCount = 1;
+
+            // transfer dst optimal -> shader read only optimal
+            //
+            image_barriers[1].sType         = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+            image_barriers[1].srcStageMask  = VK_PIPELINE_STAGE_2_TRANSFER_BIT;
+            image_barriers[1].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+            image_barriers[1].dstStageMask  = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+            image_barriers[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+            image_barriers[1].oldLayout     = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+            image_barriers[1].newLayout     = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            image_barriers[1].image         = image->handle;
+
+            image_barriers[1].subresourceRange.aspectMask = image->aspect_mask;
+            image_barriers[1].subresourceRange.levelCount = 1;
+            image_barriers[1].subresourceRange.layerCount = 1;
+
+            VkDependencyInfo dependency_info = {};
+            dependency_info.sType                   = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+            dependency_info.imageMemoryBarrierCount = 1;
+            dependency_info.pImageMemoryBarriers    = &image_barriers[0];
+
+            // Issue the copy commands
+            //
+            VkCommandBuffer cmds = VK_ScratchCommandsBegin(device);
+
+            vk->CmdPipelineBarrier2(cmds, &dependency_info);
+
+            VkBufferImageCopy region = {};
+            region.imageSubresource.aspectMask = image->aspect_mask;
+            region.imageSubresource.layerCount = 1;
+            region.imageExtent.width           = image->width;
+            region.imageExtent.height          = image->height;
+            region.imageExtent.depth           = 1;
+
+            vk->CmdCopyBufferToImage(cmds, staging_buffer->handle, image->handle,
+                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+            dependency_info.pImageMemoryBarriers = &image_barriers[1];
+
+            vk->CmdPipelineBarrier2(cmds, &dependency_info);
+
+            VK_ScratchCommandsEnd(device, cmds);
+
+            image->layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        }
+    }
+
+    // just create a view for the image here, might want to have multiple views for a single image
+    // later ...
+    //
+    {
+        VkImageViewCreateInfo create_info = {};
+        create_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        create_info.image = image->handle;
+        create_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        create_info.format   = image->format;
+
+        create_info.subresourceRange.aspectMask = image->aspect_mask;
+        create_info.subresourceRange.levelCount = 1;
+        create_info.subresourceRange.layerCount = 1;
+
+        VK_CHECK(vk->CreateImageView(device->handle, &create_info, 0, &image->view));
+    }
 }
 
 Function void VK_PipelineCreate(VK_Device *device, VK_Pipeline *pipeline) {

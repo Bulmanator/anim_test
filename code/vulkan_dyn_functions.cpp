@@ -78,6 +78,7 @@
     VK_DYN_FUNCTION(MapMemory);
     VK_DYN_FUNCTION(AllocateDescriptorSets);
     VK_DYN_FUNCTION(UpdateDescriptorSets);
+    VK_DYN_FUNCTION(CreateSampler);
 
     // commands
     //
@@ -92,6 +93,7 @@
     VK_DYN_FUNCTION(CmdBindIndexBuffer);
     VK_DYN_FUNCTION(CmdBindDescriptorSets);
     VK_DYN_FUNCTION(CmdPushConstants);
+    VK_DYN_FUNCTION(CmdCopyBufferToImage);
 
     #undef VK_DEVICE_FUNCTIONS
 #endif
