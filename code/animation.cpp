@@ -18,24 +18,13 @@
 #define CORE_IMPL 1
 #include "core.h"
 
-#include "math.cpp"
+#include "math.h"
 
 #include "file_formats.h"
 #include "animation.h"
-
 #include "render.h"
 
-static void *zmalloc(size_t size) {
-    // @todo: remove this, I think the only thing that still uses this is vulkan device allocation
-    //
-    void *result = malloc(size);
-    memset(result, 0, size);
-
-    return result;
-}
-
 #include "vulkan.h"
-#include "vulkan.cpp"
 
 Function B32 MeshFileLoad(Arena *arena, A_Mesh *mesh, Str8 path) {
     B32 result = false;
@@ -504,6 +493,7 @@ int main(int argc, char **argv) {
     VK_Context *vk = &_vk;
 
     vk->flags = VK_CONTEXT_FLAG_DEBUG;
+    vk->arena = arena;
 
     if (!VK_ContextInitialise(vk)) {
         printf("[error] :: failed to initialise vulkan\n");
@@ -745,15 +735,15 @@ int main(int argc, char **argv) {
                 }
             }
             else if (e.type == SDL_MOUSEMOTION) {
-                #define MOUSE_SENSITIVITY 0.075f
+                #define MOUSE_SENSITIVITY 0.020f
 
                 if (SDL_GetRelativeMouseMode()) {
                     yaw   += MOUSE_SENSITIVITY * delta_time * e.motion.xrel;
                     pitch += MOUSE_SENSITIVITY * delta_time * e.motion.yrel;
                 }
 
-                if (pitch < M_PI) { pitch = (F32) M_PI; }
-                if (pitch > (2 * M_PI)) { pitch = 2.0f * (F32) M_PI; }
+                if (pitch < 0.5f) { pitch = 0.5f; }
+                if (pitch > 1.0f) { pitch = 1.0f; }
             }
             else if (e.type == SDL_WINDOWEVENT) {
                 if (e.window.event == SDL_WINDOWEVENT_RESIZED) {
@@ -796,20 +786,20 @@ int main(int argc, char **argv) {
 
         // the local axes of the camera transform
         //
-        Vec3F x = M4x4FColumnExtract(rot, 0);
-        Vec3F y = M4x4FColumnExtract(rot, 1);
-        Vec3F z = M4x4FColumnExtract(rot, 2);
+        Vec3F x = M4x4FColumnExtract(rot, 0).xyz;
+        Vec3F y = M4x4FColumnExtract(rot, 1).xyz;
+        Vec3F z = M4x4FColumnExtract(rot, 2).xyz;
 
 #define MOVE_SPEED 4.7f
 
-        if (w) { p = V3FAdd(p, V3FMulF32(z, -MOVE_SPEED * delta_time)); }
-        else if (s) { p = V3FAdd(p, V3FMulF32(z, MOVE_SPEED * delta_time)); }
+        if (w) { p = V3FAdd(p, V3FScale(z, -MOVE_SPEED * delta_time)); }
+        else if (s) { p = V3FAdd(p, V3FScale(z, MOVE_SPEED * delta_time)); }
 
-        if (space) { p = V3FAdd(p, V3FMulF32(y, -MOVE_SPEED * delta_time)); }
-        else if (lshift) { p = V3FAdd(p, V3FMulF32(y, MOVE_SPEED* delta_time)); }
+        if (space) { p = V3FAdd(p, V3FScale(y, -MOVE_SPEED * delta_time)); }
+        else if (lshift) { p = V3FAdd(p, V3FScale(y, MOVE_SPEED* delta_time)); }
 
-        if (a) { p = V3FAdd(p, V3FMulF32(x, -MOVE_SPEED * delta_time)); }
-        else if (d) { p = V3FAdd(p, V3FMulF32(x, MOVE_SPEED * delta_time)); }
+        if (a) { p = V3FAdd(p, V3FScale(x, -MOVE_SPEED * delta_time)); }
+        else if (d) { p = V3FAdd(p, V3FScale(x, MOVE_SPEED * delta_time)); }
 
         F32 aspect = (F32) swapchain->surface.width / (F32) swapchain->surface.height;
 
@@ -1147,10 +1137,10 @@ A_Sample A_SampleLerp(A_Sample *a, A_Sample *b, F32 t) {
         // @todo: we need to properly interpret the mode and dot with the rest pose orientation
         // instead this allows for order-indpendent blending
         //
-        result.orientation = Q4FNLerp(a->orientation, Q4FNeg(b->orientation), t);
+        result.orientation = Q4FNormalizedLerp(a->orientation, Q4FNeg(b->orientation), t);
     }
     else {
-        result.orientation = Q4FNLerp(a->orientation, b->orientation, t);
+        result.orientation = Q4FNormalizedLerp(a->orientation, b->orientation, t);
     }
 
     return result;
@@ -1219,5 +1209,8 @@ void A_AnimationBoneMatricesGet(Mat4x4F *output_matrices, A_Skeleton *skeleton, 
         output_matrices[it] = M4x4FMul(output_matrices[it], bone->inv_bind_pose);
     }
 }
+
+#include "math.cpp"
+#include "vulkan.cpp"
 
 #include "file_formats.c"

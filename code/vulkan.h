@@ -74,6 +74,23 @@ struct VK_Buffer {
     void *data;
 };
 
+struct VK_Image {
+    VkImage     handle;
+    VkImageView view;
+
+    VkDeviceMemory memory;
+
+    U32 width;
+    U32 height;
+
+    VkFormat format;
+
+    VkImageLayout     layout;
+    VkImageUsageFlags usage;
+
+    VkImageAspectFlags aspect_mask;
+};
+
 struct VK_Device {
     VkDevice handle;
     VkPhysicalDevice physical;
@@ -105,6 +122,8 @@ struct VK_Context {
 #endif
 
     PFN_vkGetInstanceProcAddr GetInstanceProcAddr;
+
+    Arena *arena;
 
     VK_ContextFlags flags;
 
@@ -161,29 +180,7 @@ struct VK_Swapchain {
         VkImageView views[VK_MAX_IMAGE_COUNT];
     } images;
 
-    struct {
-        VkDeviceMemory memory;
-
-        VkImage     image;
-        VkImageView view;
-    } depth;
-};
-
-struct VK_Image {
-    VkImage     handle;
-    VkImageView view;
-
-    VkDeviceMemory memory;
-
-    U32 width;
-    U32 height;
-
-    VkFormat format;
-
-    VkImageLayout     layout;
-    VkImageUsageFlags usage;
-
-    VkImageAspectFlags aspect_mask;
+    VK_Image depth;
 };
 
 struct VK_PipelineState {
@@ -245,6 +242,16 @@ struct VK_Pipeline {
     } layout;
 };
 
+Function B32 VK_ContextInitialise(VK_Context *vk);
+Function B32 VK_SwapchainCreate(VK_Device *device, VK_Swapchain *swapchain);
+
+Function VK_Frame *VK_NextFrameAcquire(VK_Device *device, VK_Swapchain *swapchain);
+Function VkCommandBuffer VK_CommandBufferPush(VK_Context *vk, VK_Frame *frame);
+
 Function void VK_BufferCreate(VK_Device *device, VK_Buffer *buffer);
+Function void VK_ImageCreate(VK_Device *device, VK_Image *image, void *data);
+Function void VK_ShaderCreate(VK_Device *device, VK_Shader *shader, Str8 code);
+
+Function void VK_PipelineCreate(VK_Device *device, VK_Pipeline *pipeline);
 
 #endif  // ANIMATION_VULKAN_H_

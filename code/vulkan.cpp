@@ -37,8 +37,13 @@ static VkBool32 VK_DebugMessageCallback(
     return VK_FALSE;
 }
 
-static B32 VK_ContextInitialise(VK_Context *vk) {
+B32 VK_ContextInitialise(VK_Context *vk) {
     B32 result = false;
+
+    // The user can provide an arena they would like the renderer to use, otherwise it will
+    // create its own
+    //
+    if (!vk->arena) { vk->arena = ArenaAlloc(GB(1)); }
 
     if (!VK_LibraryLoad(vk)) {
         printf("[error] :: failed to load vulkan library\n");
@@ -62,7 +67,8 @@ static B32 VK_ContextInitialise(VK_Context *vk) {
 
     // Create instance
     //
-    // @todo: other windowing systems
+    // @todo: clean this up, I hate the way this works generally, but there is probably a better way of
+    // doing it
     //
     {
         VkApplicationInfo app_info = {};
@@ -136,7 +142,7 @@ static B32 VK_ContextInitialise(VK_Context *vk) {
         for (U32 it = 0; it < device_count; ++it) {
             VkPhysicalDevice handle = devices[it];
 
-            VK_Device *device = (VK_Device *) zmalloc(sizeof(VK_Device));
+            VK_Device *device = ArenaPush(vk->arena, VK_Device);
             last = (last ? last->next : first) = device;
 
             device->physical = handle;
@@ -424,7 +430,7 @@ static void VK_ScratchCommandsEnd(VK_Device *device, VkCommandBuffer cmds) {
     vk->FreeCommandBuffers(device->handle, device->scratch_cmd_pool, 1, &cmds);
 }
 
-static VkCommandBuffer VK_CommandBufferPush(VK_Context *vk, VK_Frame *frame) {
+VkCommandBuffer VK_CommandBufferPush(VK_Context *vk, VK_Frame *frame) {
     VkCommandBuffer result;
 
     VK_CommandBufferSet *cmds = frame->cmds;
@@ -444,7 +450,7 @@ static VkCommandBuffer VK_CommandBufferPush(VK_Context *vk, VK_Frame *frame) {
     return result;
 }
 
-static B32 VK_SurfaceCreate(VK_Device *device, VK_Swapchain *swapchain) {
+Internal B32 VK_SurfaceCreate(VK_Device *device, VK_Swapchain *swapchain) {
     B32 result = false;
 
     VK_Context *vk = device->vk;
@@ -469,7 +475,7 @@ static B32 VK_SurfaceCreate(VK_Device *device, VK_Swapchain *swapchain) {
     return result;
 }
 
-static B32 VK_SwapchainCreate(VK_Device *device, VK_Swapchain *swapchain) {
+B32 VK_SwapchainCreate(VK_Device *device, VK_Swapchain *swapchain) {
     B32 result = false;
 
     VK_Context *vk = device->vk;
@@ -588,7 +594,7 @@ static B32 VK_SwapchainCreate(VK_Device *device, VK_Swapchain *swapchain) {
         //
         vk->FreeMemory(device->handle, swapchain->depth.memory, 0);
         vk->DestroyImageView(device->handle, swapchain->depth.view, 0);
-        vk->DestroyImage(device->handle, swapchain->depth.image, 0);
+        vk->DestroyImage(device->handle, swapchain->depth.handle, 0);
 
         for (U32 it = 0; it < swapchain->images.count; ++it) {
             vk->DestroyImageView(device->handle, swapchain->images.views[it], 0);
@@ -622,65 +628,37 @@ static B32 VK_SwapchainCreate(VK_Device *device, VK_Swapchain *swapchain) {
         VK_CHECK(vk->CreateImageView(device->handle, &create_info, 0, &swapchain->images.views[it]));
     }
 
-    // @todo: memory allocator
-    // @todo: VK_Image that can be used generically
-    //
-    // setup depth resoruces
+    // Create depth buffer image
     //
     {
-        VkImageCreateInfo create_info = {};
-        create_info.sType         = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-        create_info.imageType     = VK_IMAGE_TYPE_2D;
-        create_info.format        = VK_FORMAT_D32_SFLOAT; // pretty much supported everywhere
-        create_info.extent.width  = swapchain->surface.width;
-        create_info.extent.height = swapchain->surface.height;
-        create_info.extent.depth  = 1;
-        create_info.mipLevels     = 1;
-        create_info.arrayLayers   = 1;
-        create_info.samples       = VK_SAMPLE_COUNT_1_BIT;
-        create_info.tiling        = VK_IMAGE_TILING_OPTIMAL;
-        create_info.usage         = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
-        create_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        VK_Image *depth = &swapchain->depth;
 
-        VK_CHECK(vk->CreateImage(device->handle, &create_info, 0, &swapchain->depth.image));
+        depth->width  = swapchain->surface.width;
+        depth->height = swapchain->surface.height;
 
-        VkMemoryRequirements requirements;
-        vk->GetImageMemoryRequirements(device->handle, swapchain->depth.image, &requirements);
+        depth->format = VK_FORMAT_D32_SFLOAT;
 
-        VkMemoryAllocateInfo alloc_info = {};
-        alloc_info.sType           = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-        alloc_info.allocationSize  = requirements.size;
-        alloc_info.memoryTypeIndex = VK_MemoryTypeIndexGet(device, requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        depth->layout = VK_IMAGE_LAYOUT_UNDEFINED;
+        depth->usage  = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
 
-        VK_CHECK(vk->AllocateMemory(device->handle, &alloc_info, 0, &swapchain->depth.memory));
-        VK_CHECK(vk->BindImageMemory(device->handle, swapchain->depth.image, swapchain->depth.memory, 0));
+        depth->aspect_mask = VK_IMAGE_ASPECT_DEPTH_BIT;
+
+        VK_ImageCreate(device, depth, 0);
     }
 
-    {
-        VkImageViewCreateInfo create_info = {};
-        create_info.sType    = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
-        create_info.image    = swapchain->depth.image;
-        create_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
-        create_info.format   = VK_FORMAT_D32_SFLOAT;
-
-        create_info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
-        create_info.subresourceRange.levelCount = 1;
-        create_info.subresourceRange.layerCount = 1;
-
-        VK_CHECK(vk->CreateImageView(device->handle, &create_info, 0, &swapchain->depth.view));
-    }
-
+    // Transition the image to DEPTH_STENCIL_ATTACHMENT_OPTIMAL
+    //
     {
         VkCommandBuffer cmds = VK_ScratchCommandsBegin(device);
 
         VkImageMemoryBarrier2 depth_transition = {};
         depth_transition.sType         = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
-        depth_transition.srcStageMask  = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT;
+        depth_transition.srcStageMask  = VK_PIPELINE_STAGE_2_NONE;
         depth_transition.dstStageMask  = VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT;
         depth_transition.dstAccessMask = VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
         depth_transition.oldLayout     = VK_IMAGE_LAYOUT_UNDEFINED;
         depth_transition.newLayout     = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
-        depth_transition.image         = swapchain->depth.image;
+        depth_transition.image         = swapchain->depth.handle;
 
         depth_transition.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
         depth_transition.subresourceRange.levelCount = 1;
@@ -700,7 +678,7 @@ static B32 VK_SwapchainCreate(VK_Device *device, VK_Swapchain *swapchain) {
     return result;
 }
 
-static VK_Frame *VK_NextFrameAcquire(VK_Device *device, VK_Swapchain *swapchain) {
+VK_Frame *VK_NextFrameAcquire(VK_Device *device, VK_Swapchain *swapchain) {
     VK_Frame *result = device->frame->next;
     device->frame = result;
 
@@ -804,7 +782,7 @@ void VK_BufferCreate(VK_Device *device, VK_Buffer *buffer) {
     if (buffer->host_mapped) { vk->MapMemory(device->handle, buffer->memory, 0, buffer->size, 0, &buffer->data); }
 }
 
-Function void VK_ImageCreate(VK_Device *device, VK_Image *image, void *data) {
+void VK_ImageCreate(VK_Device *device, VK_Image *image, void *data) {
     VK_Context *vk = device->vk;
 
     {
@@ -933,7 +911,7 @@ Function void VK_ImageCreate(VK_Device *device, VK_Image *image, void *data) {
     }
 }
 
-Function void VK_PipelineCreate(VK_Device *device, VK_Pipeline *pipeline) {
+void VK_PipelineCreate(VK_Device *device, VK_Pipeline *pipeline) {
     VK_Context *vk = device->vk;
 
     U32 resource_mask = 0;
@@ -1279,7 +1257,7 @@ Function void VK_ShaderSourceParse(VK_Shader *shader, Str8 spv) {
     TempRelease(&temp);
 }
 
-Function void VK_ShaderCreate(VK_Device *device, VK_Shader *shader, Str8 code) {
+void VK_ShaderCreate(VK_Device *device, VK_Shader *shader, Str8 code) {
     VK_Context *vk = device->vk;
 
     VK_ShaderSourceParse(shader, code);
