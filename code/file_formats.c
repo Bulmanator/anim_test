@@ -3,6 +3,7 @@ void AMTS_SkeletonFromData(AMTS_Skeleton *skeleton, Str8 data) {
     AMTS_Header *header = cast(AMTS_Header *) data.data;
 
     if (header->magic == AMTS_MAGIC && header->version <= AMTS_VERSION) {
+        skeleton->header    = header;
         skeleton->version   = header->version;
         skeleton->framerate = header->framerate;
 
@@ -51,11 +52,41 @@ void AMTS_SkeletonCopyFromData(Arena *arena, AMTS_Skeleton *skeleton, Str8 data)
     }
 }
 
+#if defined(OS_H_)
+
+void AMTS_SkeletonFromFile(Arena *arena, AMTS_Skeleton *skeleton, OS_Handle file) {
+    TempArena temp = TempGet(1, &arena);
+
+    // @todo: 'read entire file'
+    //
+    OS_FileInfo info = OS_FileInfoFromHandle(temp.arena, file);
+
+    Str8 data;
+    data.count = info.size;
+    data.data  = ArenaPush(arena, U8, data.count);
+
+    OS_FileRead(file, data.data, 0, data.count);
+
+    AMTS_SkeletonFromData(skeleton, data);
+
+    TempRelease(&temp);
+}
+
+void AMTS_SkeletonFromPath(Arena *arena, AMTS_Skeleton *skeleton, Str8 path) {
+    OS_Handle file = OS_FileOpen(path, OS_FILE_ACCESS_READ);
+    AMTS_SkeletonFromFile(arena, skeleton, file);
+
+    OS_FileClose(file);
+}
+
+#endif
+
 void AMTM_MeshFromData(Arena *arena, AMTM_Mesh *mesh, Str8 data) {
     AMTM_Header *header = cast(AMTM_Header *) data.data;
     if (header->magic == AMTM_MAGIC && header->version <= AMTM_VERSION) {
         // Found something that looks like what we want
         //
+        mesh->header  = header;
         mesh->version = header->version;
 
         mesh->num_materials = header->num_materials;
@@ -143,3 +174,31 @@ void AMTM_MeshCopyFromData(Arena *arena, AMTM_Mesh *mesh, Str8 data) {
         }
     }
 }
+
+#if defined(OS_H_)
+
+void AMTM_MeshFromFile(Arena *arena, AMTM_Mesh *mesh, OS_Handle file) {
+    TempArena temp = TempGet(1, &arena);
+
+    OS_FileInfo info = OS_FileInfoFromHandle(temp.arena, file);
+
+    Str8 data;
+    data.count = info.size;
+    data.data  = ArenaPush(arena, U8, data.count);
+
+    OS_FileRead(file, data.data, 0, data.count);
+
+    AMTM_MeshFromData(arena, mesh, data);
+
+    TempRelease(&temp);
+}
+
+void AMTM_MeshFromPath(Arena *arena, AMTM_Mesh *mesh, Str8 path) {
+    OS_Handle file = OS_FileOpen(path, OS_FILE_ACCESS_READ);
+    AMTM_MeshFromFile(arena, mesh, file);
+
+    OS_FileClose(file);
+}
+
+#endif
+

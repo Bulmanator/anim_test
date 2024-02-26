@@ -42,14 +42,14 @@ struct A_Skeleton {
     A_Animation *animations;
 };
 
-Function Mat4x4F A_SampleToM4x4F(A_Sample *sample);
+Func Mat4x4F A_SampleToM4x4F(A_Sample *sample);
 
-Function A_Sample A_SampleLerp(A_Sample *a, A_Sample *b, F32 t);
+Func A_Sample A_SampleLerp(A_Sample *a, A_Sample *b, F32 t);
 
-Function A_Sample *A_AnimationSamplesForFrame(A_Animation *animation, U32 num_bones, U32 frame_index);
+Func A_Sample *A_AnimationSamplesForFrame(A_Animation *animation, U32 num_bones, U32 frame_index);
 
-Function void A_AnimationEvaluate(A_Sample *output_samples, A_Skeleton *skeleton, U32 animation_index, F32 dt);
-Function void A_AnimationBoneMatricesGet(Mat4x4F *output_matrices, A_Skeleton *skeleton, A_Sample *samples);
+Func void A_AnimationEvaluate(A_Sample *output_samples, A_Skeleton *skeleton, U32 animation_index, F32 dt);
+Func void A_AnimationBoneMatricesGet(Mat4x4F *output_matrices, A_Skeleton *skeleton, A_Sample *samples);
 
 // Mesh file
 //

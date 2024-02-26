@@ -32,26 +32,6 @@ typedef int64_t B64;
 typedef float  F32;
 typedef double F64;
 
-typedef struct Str8 Str8;
-struct Str8 {
-    S64 count;
-    U8 *data;
-};
-
-typedef struct Buffer Buffer;
-struct Buffer {
-    union {
-        struct {
-            S64 used;
-            U8 *data;
-        };
-
-        Str8 str;
-    };
-
-    S64 limit;
-};
-
 #define U8_MAX  ((U8)  -1)
 #define U16_MAX ((U16) -1)
 #define U32_MAX ((U32) -1)
@@ -61,6 +41,9 @@ struct Buffer {
 #define S16_MIN ((S16) 0x8000)
 #define S32_MIN ((S32) 0x80000000)
 #define S64_MIN ((S64) 0x8000000000000000)
+
+#define F32_MIN ((F32) 1.17549435082228750796873653722224568e-038F)
+#define F64_MIN ((F64) 2.22507385850720138309023271733240406e-308 )
 
 #define S8_MAX  ((U8)  0x7F)
 #define S16_MAX ((U16) 0x7FFF)
@@ -201,26 +184,34 @@ struct Buffer {
 #if defined(CORE_LIB)
     #if COMPILER_MSVC
         #if defined(CORE_IMPL)
-            #define Function extern __declspec(dllexport)
+            #define Func extern __declspec(dllexport)
         #else
-            #define Function extern __declspec(dllimport)
+            #define Func extern __declspec(dllimport)
         #endif
     #else
-        #define Function extern
+        #define Func extern
     #endif
 #else
-    #define Function static
+    #define Func static
 #endif
 
 #if COMPILER_MSVC
     #define ThreadVar __declspec(thread)
+    #define AtomicVar volatile
 #elif (COMPILER_CLANG || COMPILER_GCC)
     #define ThreadVar __thread
+    #define AtomicVar _Atomic
 #endif
 
-#define Internal     static
+#define FileScope    static
 #define GlobalVar    static
 #define LocalPersist static
+
+// Disable some warnings
+//
+#if COMPILER_MSVC
+    #pragma warning(disable : 4201) // nonstandard extension used: nameless struct/union
+#endif
 
 //
 // --------------------------------------------------------------------------------
@@ -231,52 +222,52 @@ struct Buffer {
 
 // Returns the operand width in bits if the input is zero
 //
-Function U32 U32LeadingZeroCount(U32 x);
-Function U64 U64LeadingZeroCount(U64 x);
+Func U32 U32LeadingZeroCount(U32 x);
+Func U64 U64LeadingZeroCount(U64 x);
 
-Function U32 U32TrailingZeroCount(U32 x);
-Function U64 U64TrailingZeroCount(U64 x);
+Func U32 U32TrailingZeroCount(U32 x);
+Func U64 U64TrailingZeroCount(U64 x);
 
 // Input count is masked to the bit width of the operand
 //
-Function U32 U32RotateLeft(U32 x, U32 count);
-Function U64 U64RotateLeft(U64 x, U32 count);
+Func U32 U32RotateLeft(U32 x, U32 count);
+Func U64 U64RotateLeft(U64 x, U32 count);
 
-Function U32 U32RotateRight(U32 x, U32 count);
-Function U64 U64RotateRight(U64 x, U32 count);
+Func U32 U32RotateRight(U32 x, U32 count);
+Func U64 U64RotateRight(U64 x, U32 count);
 
-Function U32 U32PopCount(U32 x);
-Function U64 U64PopCount(U64 x);
+Func U32 U32PopCount(U32 x);
+Func U64 U64PopCount(U64 x);
 
 // Atomics
 //
 
 // All return the value stored in 'ptr' before operation
 //
-Function U32 U32AtomicAdd(volatile U32 *ptr, U32 value);
-Function U64 U64AtomicAdd(volatile U64 *ptr, U64 value);
+Func U32 U32AtomicAdd(volatile U32 *ptr, U32 value);
+Func U64 U64AtomicAdd(volatile U64 *ptr, U64 value);
 
-Function U32   U32AtomicExchange(volatile U32 *ptr, U32 exchange);
-Function U64   U64AtomicExchange(volatile U64 *ptr, U64 exchange);
-Function void *PtrAtomicExchange(void *volatile *ptr, void *exchange);
+Func U32   U32AtomicExchange(volatile U32 *ptr, U32 exchange);
+Func U64   U64AtomicExchange(volatile U64 *ptr, U64 exchange);
+Func void *PtrAtomicExchange(void *volatile *ptr, void *exchange);
 
 // Return true if operation succeeded, otherwise false
 //
-Function B32 U32AtomicCompareExchange(volatile U32 *ptr, U32 exchange, U32 comparand);
-Function B32 U64AtomicCompareExchange(volatile U64 *ptr, U64 exchange, U64 comparand);
-Function B32 PtrAtomicCompareExchange(void *volatile *ptr, void *exchange, void *comparand);
+Func B32 U32AtomicCompareExchange(volatile U32 *ptr, U32 exchange, U32 comparand);
+Func B32 U64AtomicCompareExchange(volatile U64 *ptr, U64 exchange, U64 comparand);
+Func B32 PtrAtomicCompareExchange(void *volatile *ptr, void *exchange, void *comparand);
 
 // :note these are here instead of some maths header because they are relatively useful to have about and
 // are implemented using instruction intrinsics
 //
-Function F32 F32Sqrt(F32 x);
-Function F64 F64Sqrt(F64 x);
+Func F32 F32Sqrt(F32 x);
+Func F64 F64Sqrt(F64 x);
 
-Function F32 F32InvSqrt(F32 x);
-Function F64 F64InvSqrt(F64 x);
+Func F32 F32InvSqrt(F32 x);
+Func F64 F64InvSqrt(F64 x);
 
-Function F32 F32ApproxInvSqrt(F32 x);
-Function F64 F64ApproxInvSqrt(F64 x);
+Func F32 F32ApproxInvSqrt(F32 x);
+Func F64 F64ApproxInvSqrt(F64 x);
 
 //
 // --------------------------------------------------------------------------------
@@ -346,14 +337,14 @@ struct Arena {
 
 StaticAssert(sizeof(Arena) == 64);
 
-Function Arena *ArenaAllocArgs(U64 limit, U64 commit_size, ArenaFlags flags);
-Function Arena *ArenaAlloc(U64 limit);
+Func Arena *ArenaAllocArgs(U64 limit, U64 commit_size, ArenaFlags flags);
+Func Arena *ArenaAlloc(U64 limit);
 
-Function void ArenaReset(Arena *arena);   // sets usage to 0 but arena remains valid to use
-Function void ArenaRelease(Arena *arena); // releases all backing memory for arena making it invalid to use
+Func void ArenaReset(Arena *arena);   // sets usage to 0 but arena remains valid to use
+Func void ArenaRelease(Arena *arena); // releases all backing memory for arena making it invalid to use
 
-Function void *ArenaPushFrom(Arena *arena, U64 size, ArenaFlags flags, U32 alignment);
-Function void *ArenaPushCopyFrom(Arena *arena, void *src, U64 size, ArenaFlags flags, U32 alignment);
+Func void *ArenaPushFrom(Arena *arena, U64 size, ArenaFlags flags, U32 alignment);
+Func void *ArenaPushCopyFrom(Arena *arena, void *src, U64 size, ArenaFlags flags, U32 alignment);
 
 // basic macros to push from/copy to arenas
 //
@@ -383,8 +374,8 @@ Function void *ArenaPushCopyFrom(Arena *arena, void *src, U64 size, ArenaFlags f
 // Pop allocation calls from the end of an arena
 //
 
-Function void ArenaPopTo(Arena *arena, U64 offset);
-Function void ArenaPopSize(Arena *arena, U64 size);
+Func void ArenaPopTo(Arena *arena, U64 offset);
+Func void ArenaPopSize(Arena *arena, U64 size);
 
 #define ArenaPop(...) ArenaPopExpand((__VA_ARGS__, ArenaPop3, ArenaPop2))(__VA_ARGS__)
 
@@ -413,12 +404,101 @@ struct TempArena {
 
 // Create a temporary arena from an exising arena
 //
-Function TempArena TempFrom(Arena *arena);
-Function TempArena TempGet(U32 count, Arena **conflicts);
+Func TempArena TempFrom(Arena *arena);
+Func TempArena TempGet(U32 count, Arena **conflicts);
 
-#define TempGetAny() TempGet(0, 0)
+Func void TempRelease(TempArena *temp);
 
-Function void TempRelease(TempArena *temp);
+// Utilities
+//
+#define StructZero(x) MemoryZero(x, sizeof(*(x)))
+
+Func void MemorySet(void *base, U8 v, U64 count);
+Func void MemoryZero(void *base, U64 count);
+Func void MemoryCopy(void *to, void *from, U64 count);
+Func B32  MemoryCompare(void *a, void *b, U64 count);
+
+//
+// --------------------------------------------------------------------------------
+// :String_Core
+// --------------------------------------------------------------------------------
+//
+
+#include <stdarg.h>
+
+typedef struct Str8 Str8;
+struct Str8 {
+    S64 count;
+    U8 *data;
+};
+
+typedef struct Buffer Buffer;
+struct Buffer {
+    union {
+        struct {
+            S64 used;
+            U8 *data;
+        };
+
+        Str8 str;
+    };
+
+    S64 limit;
+};
+
+#define Str8Arg(x) (S32) ((x).count), ((x).data) // This will allow Str8 values to be used with %.*s format
+
+// Wrapping strings
+//
+// The fact that we have to do this is proof that C and C++ are not interoperable with each other
+//
+#if defined(__cplusplus)
+    #define Str8Literal(x) { sizeof(x) - sizeof(*(x)), (U8 *) (x) }
+#else
+    #define Str8Literal(x) (Str8) { sizeof(x) - sizeof(*(x)), (U8 *) (x) }
+#endif
+
+#define Str8Struct(x)  { sizeof(*(x)), (U8 *) (x) }
+
+Func Str8 Str8WrapCount(U8 *data, S64 count);
+Func Str8 Str8WrapRange(U8 *start, U8 *end);
+Func Str8 Str8WrapNullTerminated(U8 *zstr);
+
+// Copying
+//
+Func Str8  Str8PushCopy(Arena *arena, Str8 str);
+Func char *Str8PushCopyNullTerminated(Arena *arena, Str8 str); // @todo: should this return Str8?
+
+// Formatting
+//
+Func Str8 Str8FormatArgs(Arena *arena, Str8 format, va_list args);
+Func Str8 Str8FormatToBufferArgs(Buffer *buffer, Str8 format, va_list args);
+
+Func Str8 Str8Format(Arena *arena, Str8 format, ...);
+Func Str8 Str8FormatToBuffer(Buffer *buffer, Str8 format, ...);
+
+// Operations
+//
+Func Str8 Str8Prefix(Str8 str, S64 count);
+Func Str8 Str8Suffix(Str8 str, S64 count);
+
+Func Str8 Str8Advance(Str8 str, S64 count);
+Func Str8 Str8Remove (Str8 str, S64 count);
+
+Func Str8 Str8Slice(Str8 str, U32 start, U32 end);
+
+// Return -1 if not found
+//
+Func S64 Str8FindFirst(Str8 str, U32 codepoint);
+Func S64 Str8FindLast (Str8 str, U32 codepoint);
+
+// This will search for the platform specific path separators (/ and \\ on win32, / only on unix etc.)
+// and return the slice from the end to the final separator, if no separators are found 'path' is returned
+//
+// If the filename has an extension this will still be included
+//
+Func Str8 Str8PathBasename(Str8 path);
+Func Str8 Str8PathDirname (Str8 path); // no trailing slash
 
 #if defined(__cplusplus)
 }
@@ -746,8 +826,6 @@ F64 F64InvSqrt(F64 x) {
 // --------------------------------------------------------------------------------
 //
 
-#include <string.h> // for memcpy
-
 #define ARENA_MIN_LIMIT       (KB(64))
 #define ARENA_MIN_COMMIT_SIZE (KB(4))
 #define ARENA_MIN_OFFSET      (64)
@@ -758,10 +836,10 @@ F64 F64InvSqrt(F64 x) {
     #define ARENA_DEFAULT_FLAGS (0)
 #endif
 
-Internal void *OS_MemoryReserve(U64 size);
-Internal B32   OS_MemoryCommit(void *base, U64 size);
-Internal void  OS_MemoryDecommit(void *base, U64 size);
-Internal void  OS_MemoryRelease(void *base, U64 size);
+FileScope void *OS_MemoryReserve(U64 size);
+FileScope B32   OS_MemoryCommit(void *base, U64 size);
+FileScope void  OS_MemoryDecommit(void *base, U64 size);
+FileScope void  OS_MemoryRelease(void *base, U64 size);
 
 Arena *ArenaAllocArgs(U64 limit, U64 commit_size, ArenaFlags flags) {
     Arena *result = 0;
@@ -946,7 +1024,7 @@ void *ArenaPushFrom(Arena *arena, U64 size, ArenaFlags flags, U32 alignment) {
             if ((flags & ARENA_FLAG_NO_ZERO) == 0) {
                 // clear the memory to zero unless otherwise specified
                 //
-                memset(result, 0, size);
+                MemoryZero(result, size);
             }
 
             Assert(arena->offset <= arena->limit);
@@ -962,7 +1040,7 @@ void *ArenaPushFrom(Arena *arena, U64 size, ArenaFlags flags, U32 alignment) {
 void *ArenaPushCopyFrom(Arena *arena, void *src, U64 size, ArenaFlags flags, U32 alignment) {
     void *result = ArenaPushFrom(arena, size, flags, alignment);
 
-    memcpy(result, src, size);
+    MemoryCopy(result, src, size);
     return result;
 }
 
@@ -1006,7 +1084,7 @@ void ArenaPopSize(Arena *arena, U64 size) {
     ArenaPopTo(arena, arena->offset - size);
 }
 
-Internal ThreadVar Arena *__tls_temp[TEMP_ARENA_COUNT];
+FileScope ThreadVar Arena *__tls_temp[TEMP_ARENA_COUNT];
 
 TempArena TempFrom(Arena *arena) {
     TempArena result;
@@ -1019,13 +1097,13 @@ TempArena TempFrom(Arena *arena) {
 TempArena TempGet(U32 count, Arena **conflicts) {
     TempArena result = { 0 };
 
-    for (U32 t = 0; t < TEMP_ARENA_COUNT; ++t) {
+    for (U32 t = 0; t < TEMP_ARENA_COUNT; t += 1) {
         Arena *temp = __tls_temp[t];
         if (!temp) {
             __tls_temp[t] = temp = ArenaAlloc(TEMP_ARENA_DEFAULT_LIMIT);
         }
 
-        for (U32 c = 0; c < count; ++c) {
+        for (U32 c = 0; c < count; c += 1) {
             if (conflicts[c] == temp) {
                 temp = 0;
                 break;
@@ -1045,6 +1123,47 @@ TempArena TempGet(U32 count, Arena **conflicts) {
 
 void TempRelease(TempArena *temp) {
     ArenaPopTo(temp->arena, temp->offset);
+}
+
+void MemorySet(void *base, U8 v, U64 count) {
+    U8 *b = cast(U8 *) base;
+
+    for (U64 it = 0; it < count; it += 1) {
+        b[it] = v;
+    }
+}
+
+void MemoryZero(void *base, U64 count) {
+    U8 *b = cast(U8 *) base;
+
+    for (U64 it = 0; it < count; it += 1) {
+        b[it] = 0;
+    }
+}
+
+void MemoryCopy(void *to, void *from, U64 count) {
+    U8 *t = cast(U8 *) to;
+    U8 *f = cast(U8 *) from;
+
+    for (U64 it = 0; it < count; it += 1) {
+        t[it] = f[it];
+    }
+}
+
+B32 MemoryCompare(void *a, void *b, U64 count) {
+    B32 result = true;
+
+    U8 *aa = cast(U8 *) a;
+    U8 *bb = cast(U8 *) b;
+
+    for (U64 it = 0; it < count; it += 1) {
+        if (aa[it] != bb[it]) {
+            result = false;
+            break;
+        }
+    }
+
+    return result;
 }
 
 //
@@ -1172,5 +1291,300 @@ void OS_MemoryRelease(void *base, U64 size) {
 }
 
 #endif
+
+//
+// --------------------------------------------------------------------------------
+// :Impl_String_Core
+// --------------------------------------------------------------------------------
+//
+
+Str8 Str8WrapCount(U8 *data, S64 count) {
+    Str8 result;
+    result.count = count;
+    result.data  = data;
+
+    return result;
+}
+
+Str8 Str8WrapRange(U8 *start, U8 *end) {
+    Str8 result;
+    result.count = cast(S64) (end - start);
+    result.data  = start;
+}
+
+FileScope S64 NullTerminatedLengthCount(U8 *zstr) {
+    S64 result = 0;
+    while (*zstr++) {
+        result += 1;
+    }
+
+    return result;
+}
+
+Str8 Str8WrapNullTerminated(U8 *zstr) {
+    Str8 result;
+    result.count = NullTerminatedLengthCount(zstr);
+    result.data  = zstr;
+
+    return result;
+}
+
+Str8 Str8PushCopy(Arena *arena, Str8 str) {
+    Str8 result;
+    result.count = str.count;
+    result.data  = ArenaPushCopy(arena, str.data, U8, str.count);
+
+    return result;
+}
+
+char *Str8PushCopyNullTerminated(Arena *arena, Str8 str) {
+    char *result = ArenaPush(arena, char, str.count + 1);
+    MemoryCopy(result, str.data, str.count);
+
+    return result;
+}
+
+#include <stdio.h> // for vsnprintf
+
+FileScope S64 Str8FormatProcess(Str8 output, const char *format, va_list args) {
+    // @todo: in the future we will probably want to roll our own to add first class support
+    // printing of our own custom types like Str8, maths types etc.
+    //
+    S64 result = vsnprintf((char *) output.data, output.count, format, args);
+    return result;
+}
+
+Str8 Str8FormatArgs(Arena *arena, Str8 format, va_list args) {
+    Str8 result;
+
+    TempArena temp = TempGet(1, &arena);
+    const char *zformat = Str8PushCopyNullTerminated(temp.arena, format);
+
+    // Just in case we need to redo the format due to the entire string length being too long
+    //
+    va_list copy;
+    va_copy(copy, args);
+
+    // Test with a very large string, pretty much all strings we format will likely be less
+    // than this size so we only have to process the format once, otherwise, we will process
+    // the format again with the corrected length
+    //
+    result.count = 1024;
+    result.data  = ArenaPush(arena, U8, result.count, ARENA_FLAG_NO_ZERO);
+
+    S64 required = Str8FormatProcess(result, zformat, args);
+    if (required < 0) {
+        // Because we are using vsnprintf for now this means an error occurred while processing,
+        // so we just pop the allocation, zero the result and return to prevent further processing
+        //
+        ArenaPop(arena, U8, result.count);
+
+        result.count = 0;
+        result.data  = 0;
+    }
+    else if (required < result.count) {
+        // There was enough space in our initial test so pop the unused amount from the end of the
+        // arena.
+        //
+        S64 removed = result.count - required;
+        ArenaPop(arena, U8, removed);
+
+        result.count = required;
+    }
+    else {
+        // Initial guess size wasn't long enough so allocate enough space based on the return
+        // from the first process and re-process the format string
+        //
+        ArenaPop(arena, U8, result.count);
+
+        result.count = required + 1;
+        result.data  = ArenaPush(arena, U8, result.count, ARENA_FLAG_NO_ZERO); // +1 for null-termination
+
+        S64 length = Str8FormatProcess(result, zformat, copy);
+        result.count -= 1; // don't include null-terminating byte in length because we don't care
+
+        Assert(length == result.count);
+    }
+
+    TempRelease(&temp);
+
+    return result;
+}
+
+Str8 Str8FormatToBufferArgs(Buffer *buffer, Str8 format, va_list args) {
+    Str8 result;
+
+    TempArena temp = TempGet(0, 0);
+    const char *zformat = Str8PushCopyNullTerminated(temp.arena, format);
+
+    result.count = buffer->limit - buffer->used;
+    result.data  = &buffer->data[buffer->used];
+
+    S64 required = Str8FormatProcess(result, zformat, args);
+    if (required < 0) {
+        // Error occurred, not much we can do
+        //
+        result.count = 0;
+        result.data  = 0;
+    }
+    else {
+        // Update result to reflect actual length of the string
+        //
+        result.count = Min(required, result.count);
+        buffer->used += result.count;
+    }
+
+    Assert(buffer->used <= buffer->limit);
+
+    TempRelease(&temp);
+
+    return result;
+}
+
+Str8 Str8Format(Arena *arena, Str8 format, ...) {
+    Str8 result;
+
+    va_list args;
+    va_start(args, format);
+
+    result = Str8FormatArgs(arena, format, args);
+    va_end(args);
+
+    return result;
+}
+
+Str8 Str8FormatToBuffer(Buffer *buffer, Str8 format, ...) {
+    Str8 result;
+
+    va_list args;
+    va_start(args, format);
+
+    result = Str8FormatToBufferArgs(buffer, format, args);
+    va_end(args);
+
+    return result;
+}
+
+Str8 Str8Prefix(Str8 str, S64 count) {
+    Str8 result;
+    result.count = Min(str.count, count);
+    result.data  = str.data;
+
+    return result;
+}
+
+Str8 Str8Suffix(Str8 str, S64 count) {
+    Str8 result;
+
+    S64 offset = str.count - Min(str.count, count);
+
+    result.count = str.count - offset;
+    result.data  = str.data  + offset;
+
+    return result;
+}
+
+Str8 Str8Advance(Str8 str, S64 count) {
+    Str8 result;
+
+    S64 dist = Min(str.count, count);
+
+    result.count = str.count - dist;
+    result.data  = str.data  + dist;
+
+    return result;
+}
+
+Str8 Str8Remove(Str8 str, S64 count) {
+    Str8 result;
+    result.count = str.count - Min(str.count, count);
+    result.data  = str.data;
+
+    return result;
+}
+
+Str8 Str8Slice(Str8 str, U32 start, U32 end) {
+    Str8 result;
+
+    Assert(start <= end);
+
+    S64 s = Min(str.count, start);
+    S64 e = Min(str.count, end);
+
+    result.data  = str.data + s;
+    result.count = (e - s);
+
+    return result;
+}
+
+S64 Str8FindFirst(Str8 str, U32 codepoint) {
+    S64 result = -1;
+
+    // @todo: decode unicode
+    //
+    for (S64 it = 0; it < str.count; it += 1) {
+        if (str.data[it] == codepoint) {
+            result = it;
+            break;
+        }
+    }
+
+    return result;
+}
+
+S64 Str8FindLast(Str8 str, U32 codepoint) {
+    S64 result = -1;
+
+    // @todo: decode unicode
+    //
+    for (S64 it = str.count - 1; it >= 0; it -= 1) {
+        if (str.data[it] == codepoint) {
+            result = it;
+            break;
+        }
+    }
+
+    return result;
+}
+
+#if OS_WINDOWS
+    #define OS_PATH_SEPARATOR_CHECK(str, it) ((str).data[it] == '/') || ((str).data[it] == '\\')
+#else
+    #define OS_PATH_SEPARATOR_CHECK(str, it) ((str).data[it] == '/')
+#endif
+
+Str8 Str8PathBasename(Str8 path) {
+    Str8 result = path;
+
+    // :note We don't need to do a full unicode decode loop here because we know we are only
+    // looking for characters (/ or \\) that are encoded by a single byte in UTF-8
+    //
+
+    for (S64 it = path.count - 1; it >= 0; it -= 1) {
+        if (OS_PATH_SEPARATOR_CHECK(path, it)) {
+            result = Str8Suffix(path, path.count - it - 1); // - 1 because we don't actually want the slash
+            break;
+        }
+    }
+
+    return result;
+}
+
+Str8 Str8PathDirname(Str8 path) {
+    Str8 result = path;
+
+    for (S64 it = path.count - 1; it >= 0; it -= 1) {
+        if (OS_PATH_SEPARATOR_CHECK(path, it)) {
+            result = Str8Prefix(path, it);
+            break;
+        }
+    }
+
+    return result;
+}
+
+// This undef can be moved elsewhere if we find we need to re-use this macro
+//
+#undef OS_PATH_SEPARATOR_CHECK
 
 #endif  // CORE_IMPL

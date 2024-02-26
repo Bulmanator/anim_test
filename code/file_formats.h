@@ -117,9 +117,10 @@ struct AMTS_TrackInfo {
 
 typedef struct AMTS_Skeleton AMTS_Skeleton;
 struct AMTS_Skeleton {
-    U32 version; // actual version loaded from file
+    AMTS_Header *header;
 
-    U32 framerate; // per second
+    U32 version;   // same as header, for easy access
+    U32 framerate; // per second, same as header, for easy access
 
     Str8 string_table;
 
@@ -133,12 +134,13 @@ struct AMTS_Skeleton {
     AMTS_Sample *samples; // flat array of header.total_samples
 };
 
+Func void AMTS_SkeletonFromData(AMTS_Skeleton *skeleton, Str8 data);
+Func void AMTS_SkeletonCopyFromData(Arena *arena, AMTS_Skeleton *skeleton, Str8 data);
 
-// @todo: AMTS_SkeletonFromFile() function!! Need to think about file system api
-//
-
-Function void AMTS_SkeletonFromData(AMTS_Skeleton *skeleton, Str8 data);
-Function void AMTS_SkeletonCopyFromData(Arena *arena, AMTS_Skeleton *skeleton, Str8 data);
+#if defined(OS_H_)
+    Func void AMTS_SkeletonFromPath(Arena *arena, AMTS_Skeleton *skeleton, Str8 path);
+    Func void AMTS_SkeletonFromFile(Arena *arena, AMTS_Skeleton *skeleton, OS_Handle file);
+#endif
 
 // Mesh (AMTM) file format
 //
@@ -370,6 +372,8 @@ struct AMTM_Submesh {
 
 typedef struct AMTM_Mesh AMTM_Mesh;
 struct AMTM_Mesh {
+    AMTM_Header *header;
+
     U32 version;
 
     Str8 string_table;
@@ -383,7 +387,12 @@ struct AMTM_Mesh {
     AMTM_Submesh  *submeshes; // Allocated from arena
 };
 
-Function void AMTM_MeshFromData(Arena *arena, AMTM_Mesh *mesh, Str8 data);
-Function void AMTM_MeshCopyFromData(Arena *arena, AMTM_Mesh *mesh, Str8 data);
+Func void AMTM_MeshFromData(Arena *arena, AMTM_Mesh *mesh, Str8 data);
+Func void AMTM_MeshCopyFromData(Arena *arena, AMTM_Mesh *mesh, Str8 data);
+
+#if defined(OS_H_)
+    Func void AMTM_MeshFromPath(Arena *arena, AMTM_Mesh *mesh, Str8 path);
+    Func void AMTM_MeshFromFile(Arena *arena, AMTM_Mesh *mesh, OS_Handle file);
+#endif
 
 #endif  // FILE_FORMATS_H_

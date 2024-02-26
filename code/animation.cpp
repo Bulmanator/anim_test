@@ -1,11 +1,4 @@
 #define _CRT_SECURE_NO_WARNINGS
-#include <stdint.h>
-
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-
-#include <assert.h>
 
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_vulkan.h>
@@ -16,7 +9,10 @@
 #include <stb_image.h>
 
 #define CORE_IMPL 1
+#define OS_IMPL   1
+
 #include "core.h"
+#include "os.h"
 
 #include "math.h"
 
@@ -26,303 +22,266 @@
 
 #include "vulkan.h"
 
-Function B32 MeshFileLoad(Arena *arena, A_Mesh *mesh, Str8 path) {
+
+Func B32 MeshFileLoad(Arena *arena, A_Mesh *mesh, Str8 path) {
     B32 result = false;
 
     TempArena temp = TempGet(1, &arena);
 
-    char *zpath = ArenaPush(temp.arena, char, path.count + 1);
-    memcpy(zpath, path.data, path.count);
+    AMTM_Mesh amtm = { 0 };
+    AMTM_MeshFromPath(temp.arena, &amtm, path);
 
-    FILE *handle = fopen(zpath, "rb");
-    if (handle) {
-        Str8 data;
+    // Copy the string table
+    //
+    mesh->string_table = Str8PushCopy(arena, amtm.string_table);
 
-        fseek(handle, 0, SEEK_END);
-        data.count = ftell(handle);
-        fseek(handle, 0, SEEK_SET);
+    mesh->num_textures  = amtm.num_textures;
+    mesh->num_submeshes = amtm.num_submeshes;
+    mesh->num_materials = amtm.num_materials;
 
-        data.data = ArenaPush(temp.arena, U8, data.count, ARENA_FLAG_NO_ZERO);
+    // Gather submesh information
+    //
+    // @todo: for now this just makes a copy of the vertex data and index data and stores it on the
+    // submesh, we should pass in a staging buffer and upload this stuff directly!
+    //
+    mesh->submeshes = ArenaPush(arena, A_Submesh, mesh->num_submeshes);
 
-        fread(data.data, data.count, 1, handle);
-        fclose(handle);
+    // running totals for base offsets
+    //
+    U32 total_vertices  = 0;
+    U32 total_indices   = 0;
 
-        AMTM_Mesh amtm = { 0 };
-        AMTM_MeshFromData(temp.arena, &amtm, data);
+    for (U32 it = 0; it < mesh->num_submeshes; ++it) {
+        A_Submesh    *dst = &mesh->submeshes[it];
+        AMTM_Submesh *src = &amtm.submeshes[it];
 
-        // Copy the string table
+        dst->name.count = src->info->name_count;
+        dst->name.data  = &mesh->string_table.data[src->info->name_offset];
+
+        dst->flags = src->info->flags;
+
+        dst->base_vertex = total_vertices;
+        dst->base_index  = total_indices;
+
+        dst->num_vertices = src->info->num_vertices;
+        dst->num_indices  = src->info->num_indices;
+
+        dst->indices = ArenaPushCopy(arena, src->indices, U16, dst->num_indices);
+
+        // @todo: come up with a more coherent way to copy the vertices, R_SkinnedVertex3 is a the
+        // same as R_Vertex3 but with extra data, this method can be error-prone in the event
+        // the vertex layout changes
         //
-        mesh->string_table.count = amtm.string_table.count;
-        mesh->string_table.data  = ArenaPushCopy(arena, amtm.string_table.data, U8, mesh->string_table.count);
+        if (dst->flags & AMTM_MESH_FLAG_IS_SKINNED) {
+            R_SkinnedVertex3   *to_vertices   = ArenaPush(arena, R_SkinnedVertex3, dst->num_vertices);
+            AMTM_SkinnedVertex *from_vertices = src->skinned_vertices;
 
-        mesh->num_textures  = amtm.num_textures;
-        mesh->num_submeshes = amtm.num_submeshes;
-        mesh->num_materials = amtm.num_materials;
+            for (U32 v = 0; v < dst->num_vertices; ++v) {
+                R_SkinnedVertex3   *to   = &to_vertices[v];
+                AMTM_SkinnedVertex *from = &from_vertices[v];
 
-        // Gather submesh information
-        //
-        // @todo: for now this just makes a copy of the vertex data and index data and stores it on the
-        // submesh, we should pass in a staging buffer and upload this stuff directly!
-        //
-        mesh->submeshes = ArenaPush(arena, A_Submesh, mesh->num_submeshes);
+                to->position.x = from->position[0];
+                to->position.y = from->position[1];
+                to->position.z = from->position[2];
 
-        // running totals for base offsets
-        //
-        U32 total_vertices  = 0;
-        U32 total_indices   = 0;
+                to->uv[0] = cast(U16) (U16_MAX * from->uv[0]);
+                to->uv[1] = cast(U16) (U16_MAX * from->uv[1]);
 
-        for (U32 it = 0; it < mesh->num_submeshes; ++it) {
-            A_Submesh    *dst = &mesh->submeshes[it];
-            AMTM_Submesh *src = &amtm.submeshes[it];
+                to->normal[0] = cast(U8) ((from->normal[0] * 127.0f) + 127.5f);
+                to->normal[1] = cast(U8) ((from->normal[1] * 127.0f) + 127.5f);
+                to->normal[2] = cast(U8) ((from->normal[2] * 127.0f) + 127.5f);
+                to->normal[3] = 254; // 1.0, unused in shader only for padding
 
-            dst->name.count = src->info->name_count;
-            dst->name.data  = &mesh->string_table.data[src->info->name_offset];
+                // @todo: when we start loading multiple meshes materials will be compacted into a
+                // single buffer on the gpu, this means the material_index will have to be re-based to
+                // the current offset in that buffer
+                //
+                // :material_base
+                //
+                to->material_index = from->material_index;
 
-            dst->flags = src->info->flags;
+                to->bone_indices[0] = from->bone_indices[0];
+                to->bone_indices[1] = from->bone_indices[1];
+                to->bone_indices[2] = from->bone_indices[2];
+                to->bone_indices[3] = from->bone_indices[3];
 
-            dst->base_vertex = total_vertices;
-            dst->base_index  = total_indices;
-
-            dst->num_vertices = src->info->num_vertices;
-            dst->num_indices  = src->info->num_indices;
-
-            dst->indices = ArenaPushCopy(arena, src->indices, U16, dst->num_indices);
-
-            // @todo: come up with a more coherent way to copy the vertices, R_SkinnedVertex3 is a the
-            // same as R_Vertex3 but with extra data, this method can be error-prone in the event
-            // the vertex layout changes
-            //
-            if (dst->flags & AMTM_MESH_FLAG_IS_SKINNED) {
-                R_SkinnedVertex3   *to_vertices   = ArenaPush(arena, R_SkinnedVertex3, dst->num_vertices);
-                AMTM_SkinnedVertex *from_vertices = src->skinned_vertices;
-
-                for (U32 v = 0; v < dst->num_vertices; ++v) {
-                    R_SkinnedVertex3   *to   = &to_vertices[v];
-                    AMTM_SkinnedVertex *from = &from_vertices[v];
-
-                    to->position.x = from->position[0];
-                    to->position.y = from->position[1];
-                    to->position.z = from->position[2];
-
-                    to->uv[0] = cast(U16) (U16_MAX * from->uv[0]);
-                    to->uv[1] = cast(U16) (U16_MAX * from->uv[1]);
-
-                    to->normal[0] = cast(U8) ((from->normal[0] * 127.0f) + 127.5f);
-                    to->normal[1] = cast(U8) ((from->normal[1] * 127.0f) + 127.5f);
-                    to->normal[2] = cast(U8) ((from->normal[2] * 127.0f) + 127.5f);
-                    to->normal[3] = 254; // 1.0, unused in shader only for padding
-
-                    // @todo: when we start loading multiple meshes materials will be compacted into a
-                    // single buffer on the gpu, this means the material_index will have to be re-based to
-                    // the current offset in that buffer
-                    //
-                    // :material_base
-                    //
-                    to->material_index = from->material_index;
-
-                    to->bone_indices[0] = from->bone_indices[0];
-                    to->bone_indices[1] = from->bone_indices[1];
-                    to->bone_indices[2] = from->bone_indices[2];
-                    to->bone_indices[3] = from->bone_indices[3];
-
-                    to->bone_weights[0] = cast(U8) (U8_MAX * from->bone_weights[0]);
-                    to->bone_weights[1] = cast(U8) (U8_MAX * from->bone_weights[1]);
-                    to->bone_weights[2] = cast(U8) (U8_MAX * from->bone_weights[2]);
-                    to->bone_weights[3] = cast(U8) (U8_MAX * from->bone_weights[3]);
-                }
-
-                dst->vertices = cast(void *) to_vertices;
-            }
-            else {
-                R_Vertex3   *to_vertices   = ArenaPush(arena, R_Vertex3, dst->num_vertices);
-                AMTM_Vertex *from_vertices = src->vertices;
-
-                for (U32 v = 0; v < dst->num_vertices; ++v) {
-                    R_Vertex3   *to   = &to_vertices[v];
-                    AMTM_Vertex *from = &from_vertices[v];
-
-                    to->position.x = from->position[0];
-                    to->position.y = from->position[1];
-                    to->position.z = from->position[2];
-
-                    to->uv[0] = cast(U16) (U16_MAX * from->uv[0]);
-                    to->uv[1] = cast(U16) (U16_MAX * from->uv[1]);
-
-                    to->normal[0] = cast(U8) ((from->normal[0] * 127.0f) + 127.5f);
-                    to->normal[1] = cast(U8) ((from->normal[1] * 127.0f) + 127.5f);
-                    to->normal[2] = cast(U8) ((from->normal[2] * 127.0f) + 127.5f);
-                    to->normal[3] = 254; // 1.0, unused in shader only for padding
-
-                    // :material_base
-                    //
-                    to->material_index = from->material_index;
-                }
-
-                dst->vertices = cast(void *) to_vertices;
+                to->bone_weights[0] = cast(U8) (U8_MAX * from->bone_weights[0]);
+                to->bone_weights[1] = cast(U8) (U8_MAX * from->bone_weights[1]);
+                to->bone_weights[2] = cast(U8) (U8_MAX * from->bone_weights[2]);
+                to->bone_weights[3] = cast(U8) (U8_MAX * from->bone_weights[3]);
             }
 
-            total_vertices += dst->num_vertices;
-            total_indices  += dst->num_indices;
+            dst->vertices = cast(void *) to_vertices;
+        }
+        else {
+            R_Vertex3   *to_vertices   = ArenaPush(arena, R_Vertex3, dst->num_vertices);
+            AMTM_Vertex *from_vertices = src->vertices;
+
+            for (U32 v = 0; v < dst->num_vertices; ++v) {
+                R_Vertex3   *to   = &to_vertices[v];
+                AMTM_Vertex *from = &from_vertices[v];
+
+                to->position.x = from->position[0];
+                to->position.y = from->position[1];
+                to->position.z = from->position[2];
+
+                to->uv[0] = cast(U16) (U16_MAX * from->uv[0]);
+                to->uv[1] = cast(U16) (U16_MAX * from->uv[1]);
+
+                to->normal[0] = cast(U8) ((from->normal[0] * 127.0f) + 127.5f);
+                to->normal[1] = cast(U8) ((from->normal[1] * 127.0f) + 127.5f);
+                to->normal[2] = cast(U8) ((from->normal[2] * 127.0f) + 127.5f);
+                to->normal[3] = 254; // 1.0, unused in shader only for padding
+
+                // :material_base
+                //
+                to->material_index = from->material_index;
+            }
+
+            dst->vertices = cast(void *) to_vertices;
         }
 
-        // Gather material data
-        //
-        mesh->materials = ArenaPush(arena, A_Material, mesh->num_materials);
-
-        for (U32 it = 0; it < mesh->num_materials; ++it) {
-            A_Material    *dst = &mesh->materials[it];
-            AMTM_Material *src = &amtm.materials[it];
-
-            dst->colour = src->colour;
-
-            dst->roughness = src->properties[AMTM_MATERIAL_PROPERTY_TYPE_ROUGHNESS];
-            dst->metallic  = src->properties[AMTM_MATERIAL_PROPERTY_TYPE_METALLIC];
-            dst->ior       = src->properties[AMTM_MATERIAL_PROPERTY_TYPE_IOR];
-
-            dst->anisotropic          = src->properties[AMTM_MATERIAL_PROPERTY_TYPE_ANISOTROPIC];
-            dst->anisotropic_rotation = src->properties[AMTM_MATERIAL_PROPERTY_TYPE_ANISOTROPIC_ROTATION];
-
-            dst->clear_coat           = src->properties[AMTM_MATERIAL_PROPERTY_TYPE_COAT_WEIGHT];
-            dst->clear_coat_roughness = src->properties[AMTM_MATERIAL_PROPERTY_TYPE_COAT_ROUGHNESS];
-
-            dst->sheen           = src->properties[AMTM_MATERIAL_PROPERTY_TYPE_SHEEN_WEIGHT];
-            dst->sheen_roughness = src->properties[AMTM_MATERIAL_PROPERTY_TYPE_SHEEN_ROUGHNESS];
-
-            U32 texture = src->textures[AMTM_MATERIAL_TEXTURE_TYPE_BASE_COLOUR];
-            Assert(texture != U32_MAX); // unused if this is the case, we require base colour texture
-
-            U32 channels = texture >> AMTM_TEXTURE_CHANNELS_SHIFT;
-            U32 index    = texture &  AMTM_TEXTURE_INDEX_MASK;
-
-            Assert(channels == 0xF); // all RGBA channels used
-
-            dst->albedo_index = index;
-        }
-
-        // Gather texture data
-        //
-        // :note we do actually load all textures even though only base colour is used, testing!
-        //
-        mesh->textures = ArenaPush(arena, A_Texture, mesh->num_textures);
-
-        for (U32 it = 0; it < mesh->num_textures; ++it) {
-            A_Texture    *dst = &mesh->textures[it];
-            AMTM_Texture *src = &amtm.textures[it];
-
-            Str8 name;
-            name.count = src->name_count;
-            name.data  = &mesh->string_table.data[src->name_offset];
-
-            dst->name = name;
-
-            char image_path[1024];
-            snprintf(image_path, sizeof(image_path), "textures/%.*s.png", cast(U32) name.count, name.data);
-
-            // load the image data
-            //
-            int w, h, c;
-            U8 *pixels = stbi_load(image_path, &w, &h, &c, 4);
-
-            Assert(pixels != 0);
-
-            dst->width  = w;
-            dst->height = h;
-            dst->pixels = pixels;
-        }
-
-        result = true;
+        total_vertices += dst->num_vertices;
+        total_indices  += dst->num_indices;
     }
 
-    return result;
-}
-
-static B32 SkeletonFileLoad(Arena *arena, A_Skeleton *skeleton, Str8 path) {
-    B32 result = false;
-
-    TempArena temp = TempGet(0, 0);
-
-    // path may or may not already be zero terminated, do this to make sure it is
+    // Gather material data
     //
-    // at the moment we know it is always zero terminated, however, in the future this might not be the case
+    mesh->materials = ArenaPush(arena, A_Material, mesh->num_materials);
+
+    for (U32 it = 0; it < mesh->num_materials; ++it) {
+        A_Material    *dst = &mesh->materials[it];
+        AMTM_Material *src = &amtm.materials[it];
+
+        dst->colour = src->colour;
+
+        dst->roughness = src->properties[AMTM_MATERIAL_PROPERTY_TYPE_ROUGHNESS];
+        dst->metallic  = src->properties[AMTM_MATERIAL_PROPERTY_TYPE_METALLIC];
+        dst->ior       = src->properties[AMTM_MATERIAL_PROPERTY_TYPE_IOR];
+
+        dst->anisotropic          = src->properties[AMTM_MATERIAL_PROPERTY_TYPE_ANISOTROPIC];
+        dst->anisotropic_rotation = src->properties[AMTM_MATERIAL_PROPERTY_TYPE_ANISOTROPIC_ROTATION];
+
+        dst->clear_coat           = src->properties[AMTM_MATERIAL_PROPERTY_TYPE_COAT_WEIGHT];
+        dst->clear_coat_roughness = src->properties[AMTM_MATERIAL_PROPERTY_TYPE_COAT_ROUGHNESS];
+
+        dst->sheen           = src->properties[AMTM_MATERIAL_PROPERTY_TYPE_SHEEN_WEIGHT];
+        dst->sheen_roughness = src->properties[AMTM_MATERIAL_PROPERTY_TYPE_SHEEN_ROUGHNESS];
+
+        U32 texture = src->textures[AMTM_MATERIAL_TEXTURE_TYPE_BASE_COLOUR];
+        Assert(texture != U32_MAX); // unused if this is the case, we require base colour texture
+
+        U32 channels = texture >> AMTM_TEXTURE_CHANNELS_SHIFT;
+        U32 index    = texture &  AMTM_TEXTURE_INDEX_MASK;
+
+        Assert(channels == 0xF); // all RGBA channels used
+
+        dst->albedo_index = index;
+    }
+
+    // Gather texture data
     //
-    char *zpath = ArenaPush(temp.arena, char, path.count + 1);
-    memcpy(zpath, path.data, path.count); // @todo: add MemoryCopy or something function to core
+    // :note we do actually load all textures even though only base colour is used, testing!
+    //
+    mesh->textures = ArenaPush(arena, A_Texture, mesh->num_textures);
 
-    FILE *handle = fopen(zpath, "rb");
-    if (handle) {
-        Str8 data;
+    Str8 exe_path = OS_PathGet(temp.arena, OS_PATH_EXECUTABLE);
 
-        fseek(handle, 0, SEEK_END);
-        data.count = ftell(handle);
-        fseek(handle, 0, SEEK_SET);
+    for (U32 it = 0; it < mesh->num_textures; ++it) {
+        A_Texture    *dst = &mesh->textures[it];
+        AMTM_Texture *src = &amtm.textures[it];
 
-        data.data = ArenaPush(temp.arena, U8, data.count, ARENA_FLAG_NO_ZERO);
+        Str8 name;
+        name.count = src->name_count;
+        name.data  = &mesh->string_table.data[src->name_offset];
 
-        fread(data.data, data.count, 1, handle);
-        fclose(handle);
+        dst->name = name;
 
-        AMTS_Skeleton amts = { 0 };
-        AMTS_SkeletonFromData(&amts, data);
+        Str8 image_path = Str8Format(temp.arena, Str8Literal("%.*s/textures/%.*s.png"), Str8Arg(exe_path), Str8Arg(name));
 
-        if (amts.version == AMTS_VERSION) {
-            // we have a version we recognise
-            //
-            Str8 string_table;
-            string_table.count = amts.string_table.count;
-            string_table.data  = ArenaPushCopy(arena, amts.string_table.data, U8, string_table.count);
+        // load the image data
+        //
+        int w, h, c;
+        U8 *pixels = stbi_load(Str8PushCopyNullTerminated(temp.arena, image_path), &w, &h, &c, 4);
 
-            skeleton->string_table = string_table;
-            skeleton->framerate    = amts.framerate;
+        Assert(pixels != 0);
 
-            skeleton->num_bones      = amts.num_bones;
-            skeleton->num_animations = amts.num_tracks;
-
-            skeleton->bones = ArenaPush(arena, A_Bone, skeleton->num_bones);
-
-            Assert(sizeof(AMTS_Sample) == sizeof(A_Sample));
-
-            for (U32 it = 0; it < skeleton->num_bones; ++it) {
-                AMTS_BoneInfo *src = &amts.bones[it];
-                A_Bone *dst = &skeleton->bones[it];
-
-                dst->parent_index = src->parent_index;
-
-                dst->name.count = src->name_count;
-                dst->name.data  = &string_table.data[src->name_offset];
-
-                A_Sample inv_bind_pose;
-
-                memcpy(&dst->bind_pose, &src->bind_pose,     sizeof(AMTS_Sample));
-                memcpy(&inv_bind_pose,  &src->inv_bind_pose, sizeof(AMTS_Sample));
-
-                dst->inv_bind_pose = A_SampleToM4x4F(&inv_bind_pose);
-            }
-
-            A_Sample *samples = ArenaPushCopy(arena, amts.samples, A_Sample, amts.total_samples);
-
-            skeleton->animations = ArenaPush(arena, A_Animation, skeleton->num_animations);
-            for (U32 it = 0; it < skeleton->num_animations; ++it) {
-                AMTS_TrackInfo *track     = &amts.tracks[it];
-                A_Animation    *animation = &skeleton->animations[it];
-
-                animation->name.count = track->name_count;
-                animation->name.data  = &string_table.data[track->name_offset];
-
-                animation->time       = 0;
-                animation->time_scale = 1;
-
-                animation->num_frames = track->num_frames;
-                animation->samples    = samples;
-
-                samples += (animation->num_frames * skeleton->num_bones);
-            }
-        }
-
-        result = true;
+        dst->width  = w;
+        dst->height = h;
+        dst->pixels = pixels;
     }
 
     TempRelease(&temp);
 
+    result = true;
+    return result;
+}
+
+Func B32 SkeletonFileLoad(Arena *arena, A_Skeleton *skeleton, Str8 path) {
+    B32 result = false;
+
+    TempArena temp = TempGet(1, &arena);
+
+    AMTS_Skeleton amts = { 0 };
+    AMTS_SkeletonFromPath(temp.arena, &amts, path);
+
+    if (amts.version == AMTS_VERSION) {
+        // we have a version we recognise
+        //
+        Str8 string_table;
+        string_table.count = amts.string_table.count;
+        string_table.data  = ArenaPushCopy(arena, amts.string_table.data, U8, string_table.count);
+
+        skeleton->string_table = string_table;
+        skeleton->framerate    = amts.framerate;
+
+        skeleton->num_bones      = amts.num_bones;
+        skeleton->num_animations = amts.num_tracks;
+
+        skeleton->bones = ArenaPush(arena, A_Bone, skeleton->num_bones);
+
+        Assert(sizeof(AMTS_Sample) == sizeof(A_Sample));
+
+        for (U32 it = 0; it < skeleton->num_bones; ++it) {
+            AMTS_BoneInfo *src = &amts.bones[it];
+            A_Bone *dst = &skeleton->bones[it];
+
+            dst->parent_index = src->parent_index;
+
+            dst->name.count = src->name_count;
+            dst->name.data  = &string_table.data[src->name_offset];
+
+            A_Sample inv_bind_pose;
+
+            MemoryCopy(&dst->bind_pose, &src->bind_pose,     sizeof(AMTS_Sample));
+            MemoryCopy(&inv_bind_pose,  &src->inv_bind_pose, sizeof(AMTS_Sample));
+
+            dst->inv_bind_pose = A_SampleToM4x4F(&inv_bind_pose);
+        }
+
+        A_Sample *samples = ArenaPushCopy(arena, amts.samples, A_Sample, amts.total_samples);
+
+        skeleton->animations = ArenaPush(arena, A_Animation, skeleton->num_animations);
+        for (U32 it = 0; it < skeleton->num_animations; ++it) {
+            AMTS_TrackInfo *track     = &amts.tracks[it];
+            A_Animation    *animation = &skeleton->animations[it];
+
+            animation->name.count = track->name_count;
+            animation->name.data  = &string_table.data[track->name_offset];
+
+            animation->time       = 0;
+            animation->time_scale = 1;
+
+            animation->num_frames = track->num_frames;
+            animation->samples    = samples;
+
+            samples += (animation->num_frames * skeleton->num_bones);
+        }
+    }
+
+    TempRelease(&temp);
+
+    result = true;
     return result;
 }
 
@@ -410,48 +369,27 @@ int main(int argc, char **argv) {
     (void) argc;
 #endif
 
-
-#if 0
-    if (argc < 3) {
-        printf("usage: %s <file>.mesh <file>.anim\n", argv[0]);
-        return 1;
-    }
-    const char *mesh_path = argv[1];
-    const char *skel_path = argv[2];
-#else
-    //const char *mesh_path = "../test/mesh/ninja_female_01.mesh";
-    //const char *skel_path = "../test/skeleton/ninja_female_01.anim";
-
-    const char *mesh_path = "../test/Characters_Mako/Characters_Mako.amtm";
-    const char *skel_path = "../test/Characters_Mako/Characters_Mako.amts";
-#endif
+    Str8 mesh_path = Str8Literal("../test/Characters_Mako/Characters_Mako.amtm");
+    Str8 skel_path = Str8Literal("../test/Characters_Mako/Characters_Mako.amts");
 
     // reserve a 64 gib arena
     //
     Arena *arena = ArenaAlloc(GB(64));
 
+    // Load Mesh
+    //
     A_Mesh mesh = {};
-    {
-        Str8 path;
-        path.count = strlen(mesh_path);
-        path.data  = cast(U8 *) mesh_path;
-
-        if (!MeshFileLoad(arena, &mesh, path)) {
-            printf("[error] :: failed to load mesh\n");
-            return 1;
-        }
+    if (!MeshFileLoad(arena, &mesh, mesh_path)) {
+        printf("[error] :: failed to load mesh\n");
+        return 1;
     }
 
+    // Load Skeleton
+    //
     A_Skeleton skeleton = {};
-    {
-        Str8 path;
-        path.count = strlen(skel_path);
-        path.data  = cast(U8 *) skel_path;
-
-        if (!SkeletonFileLoad(arena, &skeleton, path)) {
-            printf("[error] :: failed to load skeleton\n");
-            return 1;
-        }
+    if (!SkeletonFileLoad(arena, &skeleton, skel_path)) {
+        printf("[error] :: failed to load skeleton\n");
+        return 1;
     }
 
     printf("Skeleton info:\n");
@@ -592,8 +530,8 @@ int main(int argc, char **argv) {
 
             if (!(submesh->flags & AMTM_MESH_FLAG_IS_SKINNED)) { continue; }
 
-            memcpy(vertices, submesh->vertices, submesh->num_vertices * sizeof(R_SkinnedVertex3));
-            memcpy(indices,  submesh->indices,  submesh->num_indices  * sizeof(U16));
+            MemoryCopy(vertices, submesh->vertices, submesh->num_vertices * sizeof(R_SkinnedVertex3));
+            MemoryCopy(indices,  submesh->indices,  submesh->num_indices  * sizeof(U16));
 
             vertices += submesh->num_vertices;
             indices  += submesh->num_indices;
@@ -830,7 +768,7 @@ int main(int argc, char **argv) {
             A_AnimationEvaluate(samples, &skeleton, animation_index, delta_time);
             A_AnimationBoneMatricesGet(bone_matrices, &skeleton, samples);
 
-            memcpy(bb.data, bone_matrices, skeleton.num_bones * sizeof(Mat4x4F));
+            MemoryCopy(bb.data, bone_matrices, skeleton.num_bones * sizeof(Mat4x4F));
         }
 
         VkCommandBuffer cmds = VK_CommandBufferPush(vk, frame);
@@ -866,9 +804,9 @@ int main(int argc, char **argv) {
         colour_attachment.loadOp      = VK_ATTACHMENT_LOAD_OP_CLEAR;
         colour_attachment.storeOp     = VK_ATTACHMENT_STORE_OP_STORE;
 
-        colour_attachment.clearValue.color.float32[0] = 0.15f;
-        colour_attachment.clearValue.color.float32[1] = 0.15f;
-        colour_attachment.clearValue.color.float32[2] = 0.15f;
+        colour_attachment.clearValue.color.float32[0] = 0.05f;
+        colour_attachment.clearValue.color.float32[1] = 0.05f;
+        colour_attachment.clearValue.color.float32[2] = 0.05f;
         colour_attachment.clearValue.color.float32[3] = 1.0f;
 
         VkRenderingAttachmentInfo depth_attachment = {};

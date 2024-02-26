@@ -115,12 +115,7 @@ struct VK_Device {
 };
 
 struct VK_Context {
-#if OS_WINDOWS
-    HMODULE lib;
-#elif OS_LINUX
-    void *lib;
-#endif
-
+    OS_Handle lib;
     PFN_vkGetInstanceProcAddr GetInstanceProcAddr;
 
     Arena *arena;
@@ -242,16 +237,16 @@ struct VK_Pipeline {
     } layout;
 };
 
-Function B32 VK_ContextInitialise(VK_Context *vk);
-Function B32 VK_SwapchainCreate(VK_Device *device, VK_Swapchain *swapchain);
+Func B32 VK_ContextInitialise(VK_Context *vk);
+Func B32 VK_SwapchainCreate(VK_Device *device, VK_Swapchain *swapchain);
 
-Function VK_Frame *VK_NextFrameAcquire(VK_Device *device, VK_Swapchain *swapchain);
-Function VkCommandBuffer VK_CommandBufferPush(VK_Context *vk, VK_Frame *frame);
+Func VK_Frame *VK_NextFrameAcquire(VK_Device *device, VK_Swapchain *swapchain);
+Func VkCommandBuffer VK_CommandBufferPush(VK_Context *vk, VK_Frame *frame);
 
-Function void VK_BufferCreate(VK_Device *device, VK_Buffer *buffer);
-Function void VK_ImageCreate(VK_Device *device, VK_Image *image, void *data);
-Function void VK_ShaderCreate(VK_Device *device, VK_Shader *shader, Str8 code);
+Func void VK_BufferCreate(VK_Device *device, VK_Buffer *buffer);
+Func void VK_ImageCreate(VK_Device *device, VK_Image *image, void *data);
+Func void VK_ShaderCreate(VK_Device *device, VK_Shader *shader, Str8 code);
 
-Function void VK_PipelineCreate(VK_Device *device, VK_Pipeline *pipeline);
+Func void VK_PipelineCreate(VK_Device *device, VK_Pipeline *pipeline);
 
 #endif  // ANIMATION_VULKAN_H_

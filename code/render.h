@@ -61,6 +61,4 @@ struct R_SkinnedVertex3 {
     U8 bone_weights[4];
 };
 
-
-
 #endif  // RENDER_H_

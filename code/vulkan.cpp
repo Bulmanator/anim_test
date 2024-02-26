@@ -1,26 +1,12 @@
-
-static B32 VK_LibraryLoad(VK_Context *vk) {
-    B32 result;
-
 #if OS_WINDOWS
-    // I assume this just works, its how volk does it and if its in path it should be available
-    //
-    vk->lib = LoadLibraryA("vulkan-1.dll");
-    if (vk->lib) {
-        vk->GetInstanceProcAddr = (PFN_vkGetInstanceProcAddr) GetProcAddress(vk->lib, "vkGetInstanceProcAddr");
-    }
+    #define VULKAN_LIB_NAME "vulkan-1.dll"
 #elif OS_LINUX
-    vk->lib = dlopen("libvulkan.so", RTLD_NOW);
-    if (vk->lib) {
-        vk->GetInstanceProcAddr = (PFN_vkGetInstanceProcAddr) dlsym(vk->lib, "vkGetInstanceProcAddr");
-    }
+    #define VULKAN_LIB_NAME "libvulkan.so"
+#else
+    #error "vulkan backend currently unsupported on the specified platform"
 #endif
 
-    result = (vk->lib != 0) && (vk->GetInstanceProcAddr != 0);
-    return result;
-}
-
-static VkBool32 VK_DebugMessageCallback(
+FileScope VkBool32 VK_DebugMessageCallback(
         VkDebugUtilsMessageSeverityFlagBitsEXT           messageSeverity,
         VkDebugUtilsMessageTypeFlagsEXT                  messageTypes,
         const VkDebugUtilsMessengerCallbackDataEXT*      pCallbackData,
@@ -45,10 +31,8 @@ B32 VK_ContextInitialise(VK_Context *vk) {
     //
     if (!vk->arena) { vk->arena = ArenaAlloc(GB(1)); }
 
-    if (!VK_LibraryLoad(vk)) {
-        printf("[error] :: failed to load vulkan library\n");
-        return 1;
-    }
+    vk->lib = OS_LibraryOpen(Str8Literal(VULKAN_LIB_NAME));
+    vk->GetInstanceProcAddr = cast(PFN_vkGetInstanceProcAddr) OS_LibraryProcLoad(vk->lib, Str8Literal("vkGetInstanceProcAddr"));
 
     #define VK_DYN_FUNCTION(x) vk->x = (PFN_vk##x) vk->GetInstanceProcAddr(0, Stringify(vk##x))
         #define VK_GLOBAL_FUNCTIONS
@@ -375,7 +359,7 @@ B32 VK_ContextInitialise(VK_Context *vk) {
     return result;
 }
 
-static U32 VK_MemoryTypeIndexGet(VK_Device *device, U32 bits, VkMemoryPropertyFlags properties) {
+FileScope U32 VK_MemoryTypeIndexGet(VK_Device *device, U32 bits, VkMemoryPropertyFlags properties) {
     U32 result = (U32) -1;
 
     VkPhysicalDeviceMemoryProperties *props = &device->memory_properties;
@@ -392,7 +376,7 @@ static U32 VK_MemoryTypeIndexGet(VK_Device *device, U32 bits, VkMemoryPropertyFl
     return result;
 }
 
-static VkCommandBuffer VK_ScratchCommandsBegin(VK_Device *device) {
+FileScope VkCommandBuffer VK_ScratchCommandsBegin(VK_Device *device) {
     VkCommandBuffer result;
 
     VK_Context *vk = device->vk;
@@ -414,7 +398,7 @@ static VkCommandBuffer VK_ScratchCommandsBegin(VK_Device *device) {
     return result;
 }
 
-static void VK_ScratchCommandsEnd(VK_Device *device, VkCommandBuffer cmds) {
+FileScope void VK_ScratchCommandsEnd(VK_Device *device, VkCommandBuffer cmds) {
     VK_Context *vk = device->vk;
 
     VK_CHECK(vk->EndCommandBuffer(cmds));
@@ -450,7 +434,7 @@ VkCommandBuffer VK_CommandBufferPush(VK_Context *vk, VK_Frame *frame) {
     return result;
 }
 
-Internal B32 VK_SurfaceCreate(VK_Device *device, VK_Swapchain *swapchain) {
+FileScope B32 VK_SurfaceCreate(VK_Device *device, VK_Swapchain *swapchain) {
     B32 result = false;
 
     VK_Context *vk = device->vk;
@@ -824,7 +808,7 @@ void VK_ImageCreate(VK_Device *device, VK_Image *image, void *data) {
             // Copy data into staging buffer, if provided
             //
             VK_Buffer *staging_buffer = &device->staging_buffer;
-            memcpy(staging_buffer->data, data, requirements.size);
+            MemoryCopy(staging_buffer->data, data, requirements.size);
 
             // Issue buffer -> image copy with layout transitions
             //
@@ -1092,7 +1076,7 @@ struct VK_SpirvId {
     U32 binding;
 };
 
-Function VkShaderStageFlags VK_SpvExecutionModelToShaderStage(U32 model) {
+FileScope VkShaderStageFlags VK_SpvExecutionModelToShaderStage(U32 model) {
     VkShaderStageFlags result = cast(VkShaderStageFlags) 0;
 
     switch (model) {
@@ -1106,7 +1090,7 @@ Function VkShaderStageFlags VK_SpvExecutionModelToShaderStage(U32 model) {
     return result;
 }
 
-Function VkDescriptorType VK_SpvOpTypeToDescriptorType(U32 type, B32 sampled) {
+FileScope VkDescriptorType VK_SpvOpTypeToDescriptorType(U32 type, B32 sampled) {
     VkDescriptorType result = cast(VkDescriptorType) 0;
 
     switch (type) {
@@ -1122,7 +1106,7 @@ Function VkDescriptorType VK_SpvOpTypeToDescriptorType(U32 type, B32 sampled) {
     return result;
 }
 
-Function void VK_ShaderSourceParse(VK_Shader *shader, Str8 spv) {
+FileScope void VK_ShaderSourceParse(VK_Shader *shader, Str8 spv) {
     U32 *start = cast(U32 *) (spv.data);
     U32 *end   = cast(U32 *) (spv.data + spv.count);
 
